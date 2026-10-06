@@ -215,17 +215,87 @@ static void gl_clear(GLbitfield mask) {
     if (bits) C3D_RenderTargetClear(s_target, (C3D_ClearBits)bits, color, (u32)(gs.clear_depth * 0xFFFFFF));
 }
 
+/* --- color buffer readback (EFB copies, screenshots) --- */
+
+static u32* s_readback; /* linear copy of the target: 400 rows (screen x, left to right) of 240 px (screen y, bottom up) */
+static u32 s_stat_copies;
+
+/* Run the draws queued so far and wait for the GPU, without showing the frame.
+ * The color buffer keeps its contents, so drawing continues on top of it. */
+static void sync_midframe(void) {
+    if (!s_in_frame) return;
+    if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
+    C3D_RenderTargetDetachOutput(s_target);
+    C3D_FrameEnd(0);
+    s_in_frame = 0;
+    C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+    ensure_frame(); /* waits for the GPU */
+}
+
+/* Copies the current color buffer to s_readback; returns 0 if out of memory.
+ * ponytail: one GPU sync per call. Fine for the game's few EFB copies; if a scene copies
+ * every frame, render that pass to a texture target instead (the target is rotated, so a
+ * GPU-only copy would need rotated texcoords). */
+static int readback(void) {
+    if (!s_readback) s_readback = (u32*)linearAlloc(SCREEN_W * SCREEN_H * 4);
+    if (!s_readback) return 0;
+    ensure_frame();
+    sync_midframe();
+    C3D_SyncDisplayTransfer((u32*)s_target->frameBuf.colorBuf, GX_BUFFER_DIM(SCREEN_H, SCREEN_W), s_readback,
+                            GX_BUFFER_DIM(SCREEN_H, SCREEN_W),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(s_readback, SCREEN_W * SCREEN_H * 4);
+    return 1;
+}
+
+/* GL window pixel (x, y), y up -> 0xRRGGBBAA */
+static u32 readback_px(int x, int y) { return s_readback[x * SCREEN_H + y]; }
+
+/* debug switch "shots": top screen as BMP every 300 frames (shots/NNNNN.bmp, max 20) */
+static void save_shot(u32 frame) {
+    static int nshots;
+    if (nshots >= 20 || !readback()) return;
+    char path[48];
+    if (nshots++ == 0) mkdir("shots", 0777);
+    snprintf(path, sizeof(path), "shots/%05lu.bmp", (unsigned long)frame);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    static u8 row[SCREEN_W * 3];
+    u32 size = 54 + sizeof(row) * SCREEN_H;
+    u8 hdr[54] = { 'B', 'M' };
+    memcpy(hdr + 2, &size, 4);
+    hdr[10] = 54; hdr[14] = 40;
+    u32 w = SCREEN_W, h = SCREEN_H;
+    memcpy(hdr + 18, &w, 4);
+    memcpy(hdr + 22, &h, 4);
+    hdr[26] = 1; hdr[28] = 24;
+    fwrite(hdr, 1, 54, f);
+    for (int y = 0; y < SCREEN_H; y++) { /* BMP rows go bottom up, as GL */
+        for (int x = 0; x < SCREEN_W; x++) {
+            u32 v = readback_px(x, y);
+            row[x * 3] = (u8)(v >> 8); row[x * 3 + 1] = (u8)(v >> 16); row[x * 3 + 2] = (u8)(v >> 24);
+        }
+        fwrite(row, 1, sizeof(row), f);
+    }
+    fclose(f);
+}
+
 /* SDL_GL_SwapWindow */
 void n3ds_gl_swap(void) {
+    extern int g_n3ds_dbg; /* n3ds_tev.c debug switches; 64 = shots */
+    static u32 frame;
+    if ((g_n3ds_dbg & 64) && ++frame % 300 == 0) save_shot(frame);
     ensure_frame();
     if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
     C3D_FrameEnd(0);
     s_in_frame = 0;
     if (g_pc_verbose && ++s_stat_frames == 60) {
-        printf("[3DS/GL] %lu draws, %lu verts per frame, linear free %luKB\n",
+        printf("[3DS/GL] %lu draws, %lu verts per frame, %lu EFB copies/s, linear free %luKB\n",
                (unsigned long)(s_stat_draws / 60), (unsigned long)(s_stat_verts / 60),
-               (unsigned long)(linearSpaceFree() >> 10));
-        s_stat_frames = s_stat_draws = s_stat_verts = 0;
+               (unsigned long)s_stat_copies, (unsigned long)(linearSpaceFree() >> 10));
+        s_stat_frames = s_stat_draws = s_stat_verts = s_stat_copies = 0;
     }
 }
 
@@ -472,10 +542,22 @@ static void gl_get_info_log(GLuint obj, GLsizei max, GLsizei* len, GLchar* log) 
 static void gl_get_integerv(GLenum pname, GLint* out) { (void)pname; *out = 0; }
 static const GLubyte* gl_get_stringi(GLenum name, GLuint i) { (void)name; (void)i; return (const GLubyte*)""; }
 static GLint gl_get_uniform_location(GLuint prog, const GLchar* name) { (void)prog; (void)name; return 0; }
-/* ponytail: EFB copies read black until render-to-texture lands (Phase 2 step 6) */
+/* EFB copy (pc_gx.c GXCopyTex): GL_RGBA bytes, rows bottom up from y */
 static void gl_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, void* px) {
-    (void)x; (void)y; (void)fmt; (void)type;
-    memset(px, 0, (size_t)w * (size_t)h * 4);
+    (void)fmt; (void)type;
+    u8* out = (u8*)px;
+    s_stat_copies++;
+    if (!readback()) {
+        memset(px, 0, (size_t)w * (size_t)h * 4);
+        return;
+    }
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++, out += 4) {
+            int sx = x + i, sy = y + j;
+            u32 v = (sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H) ? readback_px(sx, sy) : 0;
+            out[0] = (u8)(v >> 24); out[1] = (u8)(v >> 16); out[2] = (u8)(v >> 8); out[3] = (u8)v;
+        }
+    }
 }
 
 #define NOOP(name, type) type glad_##name = (type)gl_noop;

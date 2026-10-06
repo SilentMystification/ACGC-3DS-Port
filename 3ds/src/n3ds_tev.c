@@ -31,19 +31,19 @@ static C3D_FogLut s_fog_lut;
 C3D_Tex* n3ds_gl_tex(GLuint name); /* n3ds_gl.c: NULL if no usable texture */
 
 /* Render debug switches: words in sdmc:/3ds/AnimalCrossing/debug3ds.txt
- * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex */
-enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32 };
+ * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex shots */
+enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32, DBG_SHOTS = 64 };
 int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex" };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots" };
     char buf[256] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
     if (!f) return;
     fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 7; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }

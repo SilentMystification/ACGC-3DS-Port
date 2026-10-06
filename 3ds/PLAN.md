@@ -17,7 +17,7 @@ Native 3DS homebrew port of Animal Crossing (GAFE01, USA Rev 0), built on the
 |---|---|
 | 0. Decomp baseline | Done. `ninja` in ac-decomp matches `build.sha1` (static.dol `2ae8f56e…`, foresta.rel `c59d278a…`). |
 | 1. 3DS skeleton | Done. Boots to the main loop in Azahar (O3DS and N3DS modes), no crashes. Rendering is stubbed: the top screen is black. |
-| 2. Renderer | In progress. Title demo renders: town, player, NPCs, water, logo, text, with sound. EFB copies read black. 51-53 FPS in Azahar (not a hardware number). |
+| 2. Renderer | In progress. Title demo renders: town, player, NPCs, water, logo, text, with sound. EFB copies implemented, not yet seen in a scene. 51-53 FPS in Azahar (not a hardware number). |
 | 3. Input, audio, saves | Input and audio output work through the shim. Audio command queue overflows on O3DS (see Known issues). |
 | 4. ARM performance | Not started. |
 | 5. Polish | Not started. |
@@ -105,11 +105,16 @@ Memory faults logged at the moment Azahar is force-closed are shutdown artifacts
 
 ## Phase 2: renderer (in progress)
 
-Next: EFB copies (step 6), framebuffer screenshots from the game, then compare scenes with the PC port.
+EFB copies: `glReadPixels` ends the command list without screen output, waits for the GPU, and copies the
+tiled color buffer to linear memory with one DisplayTransfer (one GPU sync per copy; the stats line counts
+them). The title demo makes none; check the inventory background in gameplay.
 
-Render debug switches: `run_azahar.ps1 -Debug "nofog nolight notex texonly logtev dumptex"` writes
+Next: scripted input for unattended gameplay tests, then compare scenes with the PC port.
+
+Render debug switches: `run_azahar.ps1 -Debug "nofog nolight notex texonly logtev dumptex shots"` writes
 `debug3ds.txt` for the game. `dumptex` saves decoded textures to `texdump/`; `python 3ds/tools/texsheet.py`
-makes `build3ds/texsheet.png` from them.
+makes `build3ds/texsheet.png` from them. `shots` saves the top screen as
+`shots/NNNNN.bmp` every 300 frames (copied to `build3ds/shots/`).
 
 Replace the GL draw path in `pc_gx.c` / `pc_gx_tev.c` / `pc_gx_texture.c` with citro3d. Keep the GX
 state tracking front half (the `GX*` API functions); swap the back half (`pc_gx_flush_vertices`,

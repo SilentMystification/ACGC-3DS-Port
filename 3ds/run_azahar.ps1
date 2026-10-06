@@ -68,6 +68,7 @@ Kill-Azahar
 Copy-Item "$out\ac_3ds.3dsx" "$sd\ac_3ds.3dsx" -Force
 Remove-Item $log -ErrorAction SilentlyContinue
 if ($Debug) { Set-Content "$sd\debug3ds.txt" $Debug } else { Remove-Item "$sd\debug3ds.txt" -ErrorAction SilentlyContinue }
+Remove-Item "$sd\shots", "$out\shots" -Recurse -ErrorAction SilentlyContinue # "shots" switch output
 Remove-Item $emuLog -ErrorAction SilentlyContinue # an old exception dump must not stop this run
 Set-GdbStub $Gdb.IsPresent
 
@@ -151,6 +152,7 @@ public class AzWin {
     if ($Gdb) { Set-GdbStub $false }
 }
 
+if (Test-Path "$sd\shots") { Copy-Item "$sd\shots" "$out\shots" -Recurse -Force }
 $secs = [int]((Get-Date) - $start).TotalSeconds
 Write-Output "stopped after $secs s: $reason"
 if ($Gdb) {
