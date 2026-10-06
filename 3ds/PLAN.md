@@ -17,7 +17,7 @@ Native 3DS homebrew port of Animal Crossing (GAFE01, USA Rev 0), built on the
 |---|---|
 | 0. Decomp baseline | Done. `ninja` in ac-decomp matches `build.sha1` (static.dol `2ae8f56e…`, foresta.rel `c59d278a…`). |
 | 1. 3DS skeleton | Done. Boots to the main loop in Azahar (O3DS and N3DS modes), no crashes. Rendering is stubbed: the top screen is black. |
-| 2. Renderer | In progress. citro3d backend draws the logo, text and NPCs on the title screen. World is black, player body is solid green, EFB copies read black. |
+| 2. Renderer | In progress. Title demo renders: town, player, NPCs, water, logo, text, with sound. EFB copies read black. 51-53 FPS in Azahar (not a hardware number). |
 | 3. Input, audio, saves | Input and audio output work through the shim. Audio command queue overflows on O3DS (see Known issues). |
 | 4. ARM performance | Not started. |
 | 5. Polish | Not started. |
@@ -77,6 +77,11 @@ error dialog, 10 s of game-log silence, or the timeout. Output: `build3ds/last_l
 `build3ds/last_shot.png`, `build3ds/last_exception.txt`, and crash addresses resolved with addr2line.
 On hardware, the game's own exception handler writes `[CRASH]` lines to `log.txt`.
 
+GDB: `run_azahar.ps1 -Gdb -GdbScript <file>` starts the Azahar GDB stub (port 24689) and runs
+`arm-none-eabi-gdb` in Docker in batch mode: the file's commands (for example `break n3ds_gl_swap`), then
+`continue`. When the game stops, gdb prints a backtrace, the registers and the stack to `build3ds/last_gdb.txt`,
+then kills the game. `sh 3ds/gdb.sh` gives an interactive gdb prompt (turn on the stub in Azahar first).
+
 
 ```sh
 sh 3ds/build.sh          # Docker devkitpro/devkitarm → build3ds/ac_3ds.3dsx
@@ -100,8 +105,11 @@ Memory faults logged at the moment Azahar is force-closed are shutdown artifacts
 
 ## Phase 2: renderer (in progress)
 
-Next: the world is black and the player body is solid green (check textures/TLUT and combiner output),
-EFB copies (step 6), GDB stub mode in `run_azahar.ps1`, framebuffer screenshots from the game.
+Next: EFB copies (step 6), framebuffer screenshots from the game, then compare scenes with the PC port.
+
+Render debug switches: `run_azahar.ps1 -Debug "nofog nolight notex texonly logtev dumptex"` writes
+`debug3ds.txt` for the game. `dumptex` saves decoded textures to `texdump/`; `python 3ds/tools/texsheet.py`
+makes `build3ds/texsheet.png` from them.
 
 Replace the GL draw path in `pc_gx.c` / `pc_gx_tev.c` / `pc_gx_texture.c` with citro3d. Keep the GX
 state tracking front half (the `GX*` API functions); swap the back half (`pc_gx_flush_vertices`,
@@ -152,6 +160,10 @@ settings menu.
   drops). The mixer costs ~2.1 ms per audio frame and reaches 57–60 frames/s while it runs, so CPU
   cost is not the cause; the audio thread stalls at times on the time-limited core 1. Dropped
   commands mean lost sound effects/music changes.
+- **Memory.** The 16 MB ARAM buffer needs the 12 MB OS arena on O3DS (`PC_MAIN_MEMORY_SIZE`). The REL stays
+  resident at 15.6 MB decompressed; that is the next big saving if memory runs out.
+- **Azahar writes SD files late.** `log.txt` on the host can lag the game by seconds, so log-silence detection
+  in `run_azahar.ps1` can miss a hang; use `-Gdb` with `continue &`, `shell sleep N`, `interrupt` to inspect one.
 - **No scene logging yet.** The log shows the trademark scene starts; later scene progress is not logged.
 
 ## Changes made to shared code (outside `3ds/`)
@@ -169,4 +181,6 @@ settings menu.
 | `src/static/jaudio_NES/internal/ja_calc.c` | Include path case (`Msl`) |
 | `src/static/jaudio_NES/internal/sub_sys.c` | Rate-limit the queue-full message on 3DS |
 | `pc/src/pc_gx.c` | 3DS branch in `pc_gx_flush_vertices`: state upload goes to `n3ds_gx_upload` |
+| `pc/include/pc_platform.h` | 3DS: 12 MB OS arena (PC: 24 MB) so the 16 MB ARAM buffer fits |
+| `pc/src/pc_aram.c` | Report an ARAM allocation failure |
 | `include/libc64/malloc.h`, `pc/src/pc_misc.c` | 3DS: game arena `malloc`/`free` use libc64 on the `MallocInit` block (PC maps them to system malloc and leaves the ~25 MB arena unused) |

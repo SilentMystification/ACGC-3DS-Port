@@ -86,7 +86,7 @@ static u8 crash_stack[0x4000] __attribute__((aligned(8)));
 
 static void crash_log(const char* s, int n) {
     svcOutputDebugString(s, n);
-    if (log_fd >= 0) write(log_fd, s, (size_t)n);
+    if (log_fd >= 0) { write(log_fd, s, (size_t)n); fsync(log_fd); } /* emulators buffer SD writes */
 }
 
 static void crash_handler(ERRF_ExceptionInfo* excep, CpuRegisters* regs) {

@@ -10,6 +10,8 @@ u32 ARInit(u32* stack_idx_addr, u32 length) {
         aram_base = (u8*)malloc(PC_ARAM_SIZE);
         if (aram_base) {
             memset(aram_base, 0, PC_ARAM_SIZE);
+        } else {
+            fprintf(stderr, "[PC/ARAM] FATAL: could not allocate %u bytes for ARAM\n", PC_ARAM_SIZE);
         }
         aram_alloc_ptr = 0;
     }

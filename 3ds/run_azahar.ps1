@@ -8,15 +8,20 @@ exception dialog, Azahar exit,
 no game log output for -Stall seconds, or -Timeout seconds. Azahar is always force-killed at the end, so the script cannot hang.
 Output: build3ds/last_log.txt (game log), build3ds/last_shot.png (-Capture), and
 [CRASH] addresses resolved to source lines (needs Docker and the ac3ds-work volume).
--Gdb: start with the Azahar GDB stub on port 24689. Azahar then waits for a debugger
-(see 3ds/gdb.sh) and -Timeout still applies.
+-Gdb: start Azahar with its GDB stub (port 24689) and attach arm-none-eabi-gdb (Docker) in
+batch mode. gdb runs -GdbScript (gdb commands, e.g. "break n3ds_gl_swap"), then "continue".
+When the game stops (breakpoint or fault), gdb prints a backtrace, the registers and the stack.
+Output: build3ds/last_gdb.txt. The run ends when gdb exits or at -Timeout. Log-silence
+detection is off, because a stopped game is silent. For an interactive prompt use 3ds/gdb.sh.
 #>
 param(
     [string]$Until = "",
     [int]$Timeout = 60,
     [int]$Stall = 10,
     [switch]$Capture,
-    [switch]$Gdb
+    [switch]$Gdb,
+    [string]$GdbScript = "",
+    [string]$Debug = ""  # render debug switches for the game, see n3ds_tev.c (nofog nolight notex texonly logtev)
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -24,7 +29,7 @@ $sd = "$env:APPDATA\Azahar\sdmc\3ds\AnimalCrossing"
 $cfg = "$env:APPDATA\Azahar\config\qt-config.ini"
 $exe = "C:\Program Files\Azahar\azahar.exe"
 $log = "$sd\log.txt"
-$emuLog = "$env:APPDATA\Azahar\logzahar_log.txt"
+$emuLog = "$env:APPDATA\Azahar\log\azahar_log.txt"
 $out = "$repo\build3ds"
 
 function Kill-Azahar {
@@ -62,6 +67,7 @@ function Set-GdbStub([bool]$on) {
 Kill-Azahar
 Copy-Item "$out\ac_3ds.3dsx" "$sd\ac_3ds.3dsx" -Force
 Remove-Item $log -ErrorAction SilentlyContinue
+if ($Debug) { Set-Content "$sd\debug3ds.txt" $Debug } else { Remove-Item "$sd\debug3ds.txt" -ErrorAction SilentlyContinue }
 Remove-Item $emuLog -ErrorAction SilentlyContinue # an old exception dump must not stop this run
 Set-GdbStub $Gdb.IsPresent
 
@@ -82,6 +88,20 @@ public class AzEnum {
 "@
 
 $p = Start-Process $exe -ArgumentList "`"$sd\ac_3ds.3dsx`"" -PassThru
+$gdbProc = $null
+if ($Gdb) {
+    # Azahar waits for gdb before it runs the game. winhost = the Windows host (IPv4) seen from Docker.
+    $cmds = @("set pagination off", "set confirm off", "set width 0", "target remote winhost:24689")
+    if ($GdbScript) { $cmds += Get-Content $GdbScript }
+    $cmds += @("continue", "echo \n--- stopped ---\n", "bt 30", "info registers", 'x/32wx $sp', "kill")
+    Set-Content "$out\gdb_cmds.txt" $cmds
+    Start-Sleep -Seconds 2
+    $gdbArgs = "run --rm --add-host=winhost:host-gateway -v ac3ds-work:/work -v `"${out}:/out`" " +
+               "devkitpro/devkitarm:latest /opt/devkitpro/devkitARM/bin/arm-none-eabi-gdb -q -batch " +
+               "-x /out/gdb_cmds.txt /work/build/ac_3ds.elf"
+    $gdbProc = Start-Process docker -ArgumentList $gdbArgs -NoNewWindow -PassThru `
+        -RedirectStandardOutput "$out\last_gdb.txt" -RedirectStandardError "$out\last_gdb_err.txt"
+}
 $start = Get-Date
 $reason = "timeout ($Timeout s)"
 $lastSize = -1
@@ -90,6 +110,7 @@ try {
     while (((Get-Date) - $start).TotalSeconds -lt $Timeout) {
         Start-Sleep -Milliseconds 500
         if ($p.HasExited) { $reason = "Azahar exited"; break }
+        if ($gdbProc -and $gdbProc.HasExited) { $reason = "gdb finished"; break }
         # Azahar shows a dialog on a guest CPU exception and the game stops: kill at once
         if ([AzEnum]::Count([uint32]$p.Id) -gt 1) { Start-Sleep -Milliseconds 300; $reason = "Azahar dialog (exception or error)"; break }
         if ((Read-Tail $emuLog) -match "Exception Type:") { Start-Sleep -Milliseconds 500; $reason = "emulator exception"; break }
@@ -97,7 +118,7 @@ try {
         # The game logs at least once per second; silence means a hang or an exception dialog
         $size = (Get-Item $log).Length
         if ($size -ne $lastSize) { $lastSize = $size; $lastGrow = Get-Date }
-        elseif (((Get-Date) - $lastGrow).TotalSeconds -gt $Stall) { $reason = "game log silent for $Stall s"; break }
+        elseif (-not $Gdb -and ((Get-Date) - $lastGrow).TotalSeconds -gt $Stall) { $reason = "game log silent for $Stall s"; break }
         $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
         if (-not $text) { continue }
         if ($text -match "\[CRASH\]") { Start-Sleep -Seconds 1; $reason = "crash"; break }
@@ -126,12 +147,25 @@ public class AzWin {
     }
 } finally {
     Kill-Azahar
+    if ($gdbProc -and -not $gdbProc.HasExited) { Stop-Process -Id $gdbProc.Id -Force -ErrorAction SilentlyContinue }
     if ($Gdb) { Set-GdbStub $false }
 }
 
 $secs = [int]((Get-Date) - $start).TotalSeconds
 Write-Output "stopped after $secs s: $reason"
+if ($Gdb) {
+    Write-Output "--- gdb (build3ds/last_gdb.txt) ---"
+    Get-Content "$out\last_gdb.txt", "$out\last_gdb_err.txt" -ErrorAction SilentlyContinue | Select-Object -Last 80
+}
 if (Test-Path $log) {
+    # Azahar writes SD files late: copy when the size has not changed for 1 s (max 6 s)
+    $prev = -1
+    for ($k = 0; $k -lt 20; $k++) {
+        $cur = (Get-Item $log).Length
+        if ($cur -eq $prev -and $k -ge 3) { break }
+        $prev = $cur
+        Start-Sleep -Milliseconds 300
+    }
     Copy-Item $log "$out\last_log.txt" -Force
     Get-Content "$out\last_log.txt" | Select-Object -Last 15
 } else {

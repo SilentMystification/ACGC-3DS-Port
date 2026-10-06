@@ -10,6 +10,7 @@
  */
 #include <3ds.h>
 #include <citro3d.h>
+#include <sys/stat.h>
 #include "pc_gx_internal.h"
 
 #define N3DS_GX_PROG 0x7FFF0001u
@@ -377,6 +378,16 @@ static void gl_tex_image_2d(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     }
     GPU_TEXCOLOR tf = gray ? GPU_LA8 : opaque ? GPU_RGB565 : binary ? GPU_RGBA5551 : GPU_RGBA8;
     u32 pw = pow2_dim(w), ph = pow2_dim(h);
+
+    extern int g_n3ds_dbg; /* n3ds_tev.c debug switches; 32 = dumptex */
+    static int ndump;
+    if ((g_n3ds_dbg & 32) && ndump < 300) { /* texdump/NNN_WxH_fmt.rgba: decoded RGBA8 input */
+        char path[64];
+        if (ndump == 0) mkdir("texdump", 0777);
+        snprintf(path, sizeof(path), "texdump/%03d_%ldx%ld_%d.rgba", ndump++, (long)w, (long)h, (int)tf);
+        FILE* f = fopen(path, "wb");
+        if (f) { fwrite(px, 4, (size_t)w * h, f); fclose(f); }
+    }
 
     if (t->valid) { /* re-specified: GPU may still read the old data this frame */
         N3DSTex* old = (N3DSTex*)malloc(sizeof(N3DSTex));

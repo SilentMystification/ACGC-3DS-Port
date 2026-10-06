@@ -30,6 +30,53 @@ static C3D_FogLut s_fog_lut;
 
 C3D_Tex* n3ds_gl_tex(GLuint name); /* n3ds_gl.c: NULL if no usable texture */
 
+/* Render debug switches: words in sdmc:/3ds/AnimalCrossing/debug3ds.txt
+ * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex */
+enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32 };
+int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
+#define s_dbg g_n3ds_dbg
+
+static void read_debug_switches(void) {
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex" };
+    char buf[256] = { 0 };
+    FILE* f = fopen("debug3ds.txt", "r");
+    if (!f) return;
+    fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    for (int i = 0; i < 6; i++)
+        if (strstr(buf, names[i])) s_dbg |= 1 << i;
+    printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
+}
+
+/* logtev: print each new TEV setup once (GX args per stage, PICA stage count) */
+static void log_tev(int ns, int pica) {
+    static u32 seen[64];
+    static int nseen;
+    u32 h = 2166136261u;
+    for (int s = 0; s < ns; s++) {
+        const PCGXTevStage* t = &g_gx.tev_stages[s];
+        int v[] = { t->color_a, t->color_b, t->color_c, t->color_d, t->alpha_a, t->alpha_b, t->alpha_c,
+                    t->alpha_d, t->color_op, t->alpha_op, t->tex_map, t->tex_coord };
+        for (int i = 0; i < 12; i++) h = (h ^ (u32)v[i]) * 16777619u;
+    }
+    h ^= (u32)ns;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == h) return;
+    if (nseen == 64) return;
+    seen[nseen++] = h;
+    printf("[3DS/TEV] cfg %d: %d GX stages -> %d PICA stages, chans=%d light=%d\n", nseen, ns, pica,
+           g_gx.num_chans, g_gx.chan_ctrl_enable[0]);
+    for (int s = 0; s < ns; s++) {
+        const PCGXTevStage* t = &g_gx.tev_stages[s];
+        int map = t->tex_map;
+        printf("[3DS/TEV]   s%d C(%d,%d,%d,%d)%s A(%d,%d,%d,%d)%s map=%d tc=%d tex=%s\n", s, t->color_a,
+               t->color_b, t->color_c, t->color_d, t->color_op ? "sub" : "", t->alpha_a, t->alpha_b,
+               t->alpha_c, t->alpha_d, t->alpha_op ? "sub" : "", map, t->tex_coord,
+               n3ds_gl_tex((map >= 0 && map < 8) ? g_gx.gl_textures[map] : 0) ? "yes" : "no");
+    }
+}
+
+
 static void warn_once(int* flag, const char* msg) {
     if (!*flag) {
         *flag = 1;
@@ -349,7 +396,7 @@ static void n3ds_tev_build(void) {
     for (int s = 0; s < ns; s++) {
         const PCGXTevStage* ts = &g_gx.tev_stages[s];
         int map = ts->tex_map;
-        int has_tex = n3ds_gl_tex((map >= 0 && map < 8) ? g_gx.gl_textures[map] : 0) != NULL;
+        int has_tex = !(s_dbg & DBG_NOTEX) && n3ds_gl_tex((map >= 0 && map < 8) ? g_gx.gl_textures[map] : 0) != NULL;
         TevOp cops[5], aops[5];
 
         if (ts->color_out != 0 || ts->alpha_out != 0)
@@ -403,6 +450,16 @@ static void n3ds_tev_build(void) {
         C3D_TexEnvColor(env, to_u8(p[0]) | (to_u8(p[1]) << 8) | (to_u8(p[2]) << 16) | ((u32)to_u8(p[3]) << 24));
         pica = 1;
     }
+    if (s_dbg & DBG_TEXONLY) { /* stage 0 texture (or vertex color) only */
+        C3D_TexEnv* env = C3D_GetTexEnv(0);
+        int map = ns > 0 ? g_gx.tev_stages[0].tex_map : -1;
+        int tex = n3ds_gl_tex((map >= 0 && map < 8) ? g_gx.gl_textures[map] : 0) != NULL;
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_Both, tex ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        pica = 1;
+    }
+    if (s_dbg & DBG_LOGTEV) log_tev(ns, pica);
     for (int i = pica; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
     C3D_TexEnvBufUpdate(C3D_Both, buf_mask);
 }
@@ -485,7 +542,7 @@ static void n3ds_texgen(void) {
 static void n3ds_lighting(void) {
     const float* mat = g_gx.chan_mat_color[0];
     const float* amb = g_gx.chan_amb_color[0];
-    int lit = g_gx.num_chans > 0 && g_gx.chan_ctrl_enable[0];
+    int lit = g_gx.num_chans > 0 && g_gx.chan_ctrl_enable[0] && !(s_dbg & DBG_NOLIGHT);
     float ms = g_gx.chan_ctrl_mat_src[0] ? 1.0f : 0.0f;
     float mas = g_gx.chan_ctrl_mat_src[1] ? 1.0f : 0.0f;
     float as = g_gx.chan_ctrl_amb_src[0] ? 1.0f : 0.0f;
@@ -526,7 +583,7 @@ static void n3ds_lighting(void) {
 /* Linear GX fog on eye distance, through the PICA fog LUT (indexed by depth).
  * ponytail: assumes viewport depth range 0..1 (depth = z_ndc + 1); pass the range in if AC uses another. */
 static void n3ds_fog(void) {
-    if (g_gx.fog_type == 0) {
+    if (g_gx.fog_type == 0 || (s_dbg & DBG_NOFOG)) {
         C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         return;
     }
@@ -571,6 +628,7 @@ void n3ds_gx_upload(unsigned int dirty) {
 /* --- pc_gx_tev.c interface --- */
 
 void pc_gx_tev_init(void) {
+    read_debug_switches();
     s_dvlb = DVLB_ParseFile((u32*)gx_shader_shbin, gx_shader_shbin_size);
     shaderProgramInit(&s_prog);
     shaderProgramSetVsh(&s_prog, &s_dvlb->DVLE[0]);

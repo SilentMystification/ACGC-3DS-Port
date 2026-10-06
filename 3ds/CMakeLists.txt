@@ -24,7 +24,8 @@ add_compile_definitions(
 )
 
 # Same UB-neutralizing flags as the PC port's -O2 build.
-add_compile_options(-O2 -fno-strict-aliasing -fwrapv -ffunction-sections -fdata-sections)
+# -fsigned-char: the game assumes signed plain char (as on x86 and the GC compiler); ARM defaults to unsigned.
+add_compile_options(-O2 -fno-strict-aliasing -fwrapv -fsigned-char -ffunction-sections -fdata-sections)
 add_compile_options($<$<COMPILE_LANGUAGE:C>:-Dnullptr=NULL>)
 
 include_directories(
