@@ -1,11 +1,9 @@
-#ifndef _MATH_H_
-#define _MATH_H_
+#ifndef _AC_LIBC_MATH_H_
+#define _AC_LIBC_MATH_H_
 
 #ifdef TARGET_PC
-/* Undef guard since MinGW-w64 math.h uses the same _MATH_H_ guard name */
-#undef _MATH_H_
+/* this file's guard is _AC_LIBC_MATH_H_, so the system math.h guard is untouched */
 #include_next <math.h>
-#define _MATH_H_
 #else
 
 #define NAN       (0.0f / 0.0f)

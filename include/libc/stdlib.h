@@ -1,5 +1,5 @@
-#ifndef _STDLIB_H_
-#define _STDLIB_H_
+#ifndef _AC_LIBC_STDLIB_H_
+#define _AC_LIBC_STDLIB_H_
 
 #ifdef TARGET_PC
 #include_next <stdlib.h>

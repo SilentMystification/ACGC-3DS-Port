@@ -40,7 +40,27 @@ static int pc_audio_producer_func(void* data) {
     while (SDL_AtomicGet(&audio_thread_running)) {
         int fill = pc_audio_get_buffer_fill();
         if (fill < AUDIO_PRODUCE_THRESHOLD) {
+#ifdef TARGET_3DS
+            /* producer throughput: audio frames/s and mix cost, every 2s */
+            static Uint64 stat_start, stat_busy;
+            static int stat_frames;
+            Uint64 t0 = SDL_GetPerformanceCounter();
+            if (!stat_start) stat_start = t0;
             pc_audio_process_frame();
+            Uint64 t1 = SDL_GetPerformanceCounter();
+            stat_busy += t1 - t0;
+            stat_frames++;
+            if (t1 - stat_start >= 2 * SDL_GetPerformanceFrequency()) {
+                double secs = (double)(t1 - stat_start) / SDL_GetPerformanceFrequency();
+                printf("[AUDIO] %.1f frames/s, mix %.2f ms/frame, fill=%d\n", stat_frames / secs,
+                       stat_busy * 1000.0 / SDL_GetPerformanceFrequency() / stat_frames, fill);
+                stat_start = t1;
+                stat_busy = 0;
+                stat_frames = 0;
+            }
+#else
+            pc_audio_process_frame();
+#endif
         } else {
             SDL_Delay(1);
         }

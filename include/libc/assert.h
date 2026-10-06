@@ -1,5 +1,5 @@
-#ifndef _ASSERT_H_
-#define _ASSERT_H_
+#ifndef _AC_LIBC_ASSERT_H_
+#define _AC_LIBC_ASSERT_H_
 
 #ifdef TARGET_PC
 #include_next <assert.h>

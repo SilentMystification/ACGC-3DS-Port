@@ -1,5 +1,5 @@
-#ifndef _STDDEF_H_
-#define _STDDEF_H_
+#ifndef _AC_LIBC_STDDEF_H_
+#define _AC_LIBC_STDDEF_H_
 
 #ifdef TARGET_PC
 /* Undefine our guard so GCC's stddef.h doesn't skip itself */

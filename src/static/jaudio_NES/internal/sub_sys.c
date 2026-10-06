@@ -280,7 +280,14 @@ extern s32 Nap_SendStart(void) {
     if (res != -1) {
         AG.thread_cmd_read_pos = AG.thread_cmd_write_pos;
     } else {
+#ifdef TARGET_3DS
+        { /* audio thread behind: report once per 600 drops instead of every frame */
+            static u32 drops;
+            if ((drops++ % 600) == 0) OSReport("SendStart::Mesg Full Queue (%u dropped)\n", drops);
+        }
+#else
         OSReport("SendStart::Mesg Full Queue\n");
+#endif
         return -1;
     }
 

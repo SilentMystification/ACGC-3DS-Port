@@ -490,7 +490,13 @@ extern void JW_Init() {
     void* arena_hi = OSGetArenaHi();
     void* arena_lo = OSGetArenaLo();
 
+#ifdef TARGET_3DS
+    /* ARM EABI 8-byte-aligns u64 members, so the root JKRExpHeap header plus the
+     * block header is larger than the 0xD0 the GC build reserves. */
+    SystemHeapSize = (u32)arena_hi - (u32)arena_lo - 0x200;
+#else
     SystemHeapSize = (u32)arena_hi - (u32)arena_lo - 0xD0;
+#endif
     JC_JFWSystem_setMaxStdHeap(1);
     JC_JFWSystem_setSysHeapSize(SystemHeapSize);
     JC_JFWSystem_setFifoBufSize(0x10001);

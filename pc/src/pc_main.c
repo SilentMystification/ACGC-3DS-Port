@@ -333,6 +333,7 @@ int main(int argc, char* argv[]) {
 
     /* Redirect stdout/stderr to NUL unless verbose — unbuffered terminal writes
      * are extremely slow on Windows and tank FPS. */
+#ifndef __3DS__ /* 3DS: stdout goes to the bottom-screen console */
     if (!g_pc_verbose && !g_pc_profile_enabled) {
 #ifdef _WIN32
         freopen("NUL", "w", stdout);
@@ -345,9 +346,16 @@ int main(int argc, char* argv[]) {
         setvbuf(stdout, NULL, _IONBF, 0);
         setvbuf(stderr, NULL, _IONBF, 0);
     }
+#endif
 
     /* exe image range for seg2k0 — BSS can overlap N64 segment addresses */
-#ifdef _WIN32
+#if defined(__3DS__)
+    {
+        extern char __start__[], __end__[];
+        pc_image_base = (unsigned int)(uintptr_t)__start__;
+        pc_image_end = (unsigned int)(uintptr_t)__end__;
+    }
+#elif defined(_WIN32)
     {
         HMODULE exe = GetModuleHandle(NULL);
         IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)exe;

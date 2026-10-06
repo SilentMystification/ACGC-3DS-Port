@@ -50,7 +50,9 @@ extern "C" {
 #define CONT_ERR_VOICE_NO_RESPONSE 15
 
 #ifdef TARGET_PC
-/* 'errno' is a macro on PC (from <errno.h>), rename the struct member */
+/* 'errno' is a macro on PC (from <errno.h>), rename the struct member.
+ * Include it first so a later <errno.h> is a guarded no-op (newlib). */
+#include <errno.h>
 #ifdef errno
 #undef errno
 #endif

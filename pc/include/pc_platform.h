@@ -13,6 +13,7 @@
 #include <glad/gl.h>
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -52,6 +53,8 @@
 #include <windows.h>
 #undef near
 #undef far
+#elif defined(__3DS__)
+/* no mmap/dlfcn on 3DS; see 3ds/src/n3ds_sys.c */
 #else
 #include <sys/mman.h>
 #include <dlfcn.h>

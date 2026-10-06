@@ -1,5 +1,5 @@
-#ifndef _STDIO_H_
-#define _STDIO_H_
+#ifndef _AC_LIBC_STDIO_H_
+#define _AC_LIBC_STDIO_H_
 
 #ifdef TARGET_PC
 #include_next <stdio.h>

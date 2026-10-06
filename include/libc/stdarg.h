@@ -1,5 +1,5 @@
-#ifndef _STDARG_H_
-#define _STDARG_H_
+#ifndef _AC_LIBC_STDARG_H_
+#define _AC_LIBC_STDARG_H_
 
 #ifdef TARGET_PC
 #include_next <stdarg.h>

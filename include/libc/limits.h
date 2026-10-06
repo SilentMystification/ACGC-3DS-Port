@@ -1,5 +1,5 @@
-#ifndef _LIMITS_H_
-#define _LIMITS_H_
+#ifndef _AC_LIBC_LIMITS_H_
+#define _AC_LIBC_LIMITS_H_
 
 #ifdef TARGET_PC
 #include_next <limits.h>
