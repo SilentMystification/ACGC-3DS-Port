@@ -45,6 +45,7 @@ typedef struct {
     float nrm[3];
     u8 clr[4];
     float tc[2];
+    float pal; /* batch palette offset (3 * slot) */
 } N3DSVtx;
 
 static C3D_RenderTarget* s_target;
@@ -262,8 +263,11 @@ static void watchdog_thread(void* arg) {
     (void)arg;
     extern u32 n3ds_log_lock_held_ms(u32* owner);
     u32 last = 0, still = 0, reported = 0, lock_reported = 0;
+    u64 t_app = osGetTime(); /* osGetTime counts from console boot; uptime counts from here */
     for (;;) {
         svcSleepThread(1000000000LL);
+        extern void n3ds_status(int row, const char* fmt, ...);
+        n3ds_status(4, "uptime %lu s", (unsigned long)((osGetTime() - t_app) / 1000)); /* once a second, row 4 */
         u32 owner, held = n3ds_log_lock_held_ms(&owner);
         if (held > 500 && !lock_reported) {
             char msg[96];
@@ -290,6 +294,8 @@ static void ensure_frame(void) {
     if (s_in_frame) return;
     s_step = "wait for GPU (FrameBegin)";
     u64 t0 = osGetTime();
+    extern unsigned long long n3ds_gpu_wait_ticks;
+    unsigned long long t_wait = svcGetSystemTick();
     int reported = 0;
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) { /* the GPU still runs the previous frame */
         if (!reported && osGetTime() - t0 > 2000) {
@@ -298,6 +304,7 @@ static void ensure_frame(void) {
         }
         svcSleepThread(200000);
     }
+    n3ds_gpu_wait_ticks += svcGetSystemTick() - t_wait;
     s_step = "frame setup";
     s_nrecs[0] = 0;
     C3D_FrameDrawOn(s_target);
@@ -450,6 +457,14 @@ static void perf_frame(void) {
         printf("[PERF] %.0fs: %.1f fps, worst %.1fms, %lu stutters, %lu draws %lu vtx/frame, heap %luK linear %luK free, audio mix %.2fms\n",
                s, sum_frames / s, sum_worst, (unsigned long)sum_stutters, (unsigned long)(sum_draws / sum_frames),
                (unsigned long)(sum_verts / sum_frames), (unsigned long)heap, (unsigned long)lin, g_n3ds_audio_mix_ms);
+        {   /* [FRAME] per-frame split of the window: GPU wait at frame start, and C3D_FrameEnd submit */
+            extern unsigned long long n3ds_gpu_wait_ticks, n3ds_frame_end_ticks;
+            double ms_wait = (double)n3ds_gpu_wait_ticks / (double)sum_frames / 268123.0;
+            double ms_end = (double)n3ds_frame_end_ticks / (double)sum_frames / 268123.0;
+            printf("[FRAME] 600f: gpu wait %.2f ms/frame, frame end %.2f ms/frame, wall %.2f ms/frame\n",
+                   ms_wait, ms_end, s * 1000.0 / sum_frames);
+            n3ds_gpu_wait_ticks = n3ds_frame_end_ticks = 0;
+        }
         sum_frames = sum_stutters = sum_draws = sum_verts = 0;
         sum_ticks = 0;
         sum_worst = 0.0f;
@@ -469,7 +484,11 @@ void n3ds_gl_swap(void) {
     ensure_frame();
     if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
     s_step = "FrameEnd (submit)";
+    { extern unsigned int n3ds_frame_id; n3ds_frame_id++; } /* [USE] per-frame counting (n3ds_calls.c) */
+    extern unsigned long long n3ds_frame_end_ticks;
+    unsigned long long t_end = svcGetSystemTick();
     C3D_FrameEnd(0);
+    n3ds_frame_end_ticks += svcGetSystemTick() - t_end;
     memcpy(s_recs[1], s_recs[0], sizeof(s_recs[0]));
     s_nrecs[1] = s_nrecs[0];
     s_frames_done++;
@@ -513,6 +532,7 @@ static void gl_buffer_data(GLenum target, GLsizeiptr size, const void* data, GLe
         memcpy(dst[i].nrm, src[i].normal, sizeof(dst[i].nrm));
         memcpy(dst[i].clr, src[i].color0, sizeof(dst[i].clr));
         memcpy(dst[i].tc, src[i].texcoord[0], sizeof(dst[i].tc));
+        dst[i].pal = src[i].pal;
     }
     s_draw_vtx = dst;
     s_arena_used += count;
@@ -524,7 +544,7 @@ static int draw_ready(void) {
     if (gs.cull && gs.cull_face == GL_FRONT_AND_BACK) return 0;
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
-    BufInfo_Add(bi, s_draw_vtx, sizeof(N3DSVtx), 4, 0x3210);
+    BufInfo_Add(bi, s_draw_vtx, sizeof(N3DSVtx), 5, 0x43210);
     s_stat_draws++;
     return 1;
 }

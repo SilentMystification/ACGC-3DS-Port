@@ -135,10 +135,8 @@ extern int pc_emu64_frame_dl_cmds;
 extern int pc_emu64_frame_cull_visible;
 extern int pc_emu64_frame_cull_rejected;
 #ifdef TARGET_3DS
-/* emu64 opcode ticks (osGetCount) per gfx_cmd byte, reset by n3ds_calls_report every 600 frames */
-extern unsigned int pc_emu64_cmd_ticks[256];
+/* emu64 opcode count per gfx_cmd byte, reset by n3ds_emu64_report every 600 frames */
 extern unsigned int pc_emu64_cmd_calls[256];
-unsigned long long n3ds_emu64_tick(void); /* n3ds_calls.c: libctru system tick, 268123 per ms */
 #endif
 extern int pc_gx_draw_call_count;
 

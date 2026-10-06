@@ -2719,6 +2719,12 @@ void emu64::set_position(unsigned int vtx) {
         }
     }
 
+#ifdef TARGET_3DS
+    { /* debug switch "nogxvtx" (bit 8192): timing experiment, skips everything after the transform (pixels wrong) */
+        extern int g_n3ds_dbg;
+        if (g_n3ds_dbg & 8192) return;
+    }
+#endif
     if ((this->othermode_low & ZMODE_DEC) == ZMODE_DEC && (this->geometry_mode & G_ZBUFFER) != 0 &&
         (this->geometry_mode & G_DECAL_EQUAL) == 0) {
         Vec tmp;
@@ -5812,12 +5818,8 @@ u32 emu64::emu64_taskstart_r(Gfx* dl_p) {
         if (cmd_index < NUM_COMMANDS) {
             if (dl_func_tbl[cmd_index] != nullptr) {
 #ifdef TARGET_3DS
-                /* ponytail: two svc tick reads per opcode, only for [EMU64] diagnosis; drop once step 3 is picked.
-                 * osGetCount is ms on 3DS (too coarse per opcode), so use the libctru system tick instead. */
                 u8 cmd_op = this->gfx_cmd; /* handler may fetch the next command and change gfx_cmd */
-                unsigned long long cmd_t0 = n3ds_emu64_tick();
                 (this->*dl_func_tbl[cmd_index])();
-                pc_emu64_cmd_ticks[cmd_op] += (unsigned int)(n3ds_emu64_tick() - cmd_t0);
                 pc_emu64_cmd_calls[cmd_op]++;
 #else
                 EMU64_TIMED_SEGMENT_BEGIN();

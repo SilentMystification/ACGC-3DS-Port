@@ -51,31 +51,59 @@ void n3ds_calls_report(void) {
     }
 }
 
-/* [EMU64] top opcodes by handler time, last 600 frames (emu64.c dispatch, 3DS only, same switch).
- * Each opcode costs two tick reads, so the ms values are inflated. Rank by ms, do not trust the absolute time. */
+/* [FRAME] frame-time split, always on (two tick reads per frame): CPU waiting for the GPU at frame start,
+ * and time inside C3D_FrameEnd (command submit). Ticks at 268123 per ms. */
 #define N3DS_TICKS_PER_MS 268123.0 /* libctru system tick rate */
-extern unsigned int pc_emu64_cmd_ticks[256];
 extern unsigned int pc_emu64_cmd_calls[256];
-extern int g_n3ds_dbg; /* n3ds_tev.c; 2048 = calls */
-unsigned long long n3ds_emu64_tick(void) { return (g_n3ds_dbg & 2048) ? svcGetSystemTick() : 0; }
+unsigned long long n3ds_gpu_wait_ticks, n3ds_frame_end_ticks;
+
+/* [USE] distinct textures and position matrices per frame, counted between frame ends (n3ds_gl_swap bumps the id) */
+unsigned int n3ds_frame_id;
+static unsigned int s_use_frame, s_use_n[2], s_use_keys[2][64], s_use_overflow[2];
+static unsigned long long s_use_distinct[2], s_use_frames, s_use_loads[2];
+void n3ds_note_use(int kind, unsigned int key) {
+    if (s_use_frame != n3ds_frame_id) {
+        for (int k = 0; k < 2; k++) { s_use_distinct[k] += s_use_n[k]; s_use_n[k] = 0; }
+        s_use_frames++;
+        s_use_frame = n3ds_frame_id;
+    }
+    s_use_loads[kind]++;
+    for (unsigned int i = 0; i < s_use_n[kind]; i++)
+        if (s_use_keys[kind][i] == key) return;
+    if (s_use_n[kind] < 64) s_use_keys[kind][s_use_n[kind]++] = key;
+    else s_use_overflow[kind]++;
+}
 
 void n3ds_emu64_report(void) {
-    static unsigned int ticks[256], calls[256];
-    unsigned long long sum_ticks = 0, sum_calls = 0;
-    memcpy(ticks, pc_emu64_cmd_ticks, sizeof(ticks));
+    static unsigned int calls[256];
+    unsigned long long sum_calls = 0;
     memcpy(calls, pc_emu64_cmd_calls, sizeof(calls));
-    memset(pc_emu64_cmd_ticks, 0, sizeof(pc_emu64_cmd_ticks));
     memset(pc_emu64_cmd_calls, 0, sizeof(pc_emu64_cmd_calls));
-    for (int i = 0; i < 256; i++) { sum_ticks += ticks[i]; sum_calls += calls[i]; }
-    printf("[EMU64] 600f opcodes=%lu handler=%.1fms\n", (unsigned long)sum_calls, sum_ticks / N3DS_TICKS_PER_MS);
-    for (int k = 0; k < 8; k++) {
-        int best = -1;
-        for (int i = 0; i < 256; i++)
-            if (ticks[i] && (best < 0 || ticks[i] > ticks[best])) best = i;
-        if (best < 0) break;
-        printf("[EMU64] op %02X calls=%lu ms=%.1f\n", best, (unsigned long)calls[best], ticks[best] / N3DS_TICKS_PER_MS);
-        ticks[best] = 0;
+    for (int i = 0; i < 256; i++) sum_calls += calls[i];
+    printf("[EMU64] 600f opcodes=%lu\n", (unsigned long)sum_calls);
+
+    /* [DRAW] forced draws in pc_gx_flush_vertices, reasons and dirty bits, same 600-frame window */
+    extern unsigned int pc_gx_flush_reason[5];
+    extern unsigned int pc_gx_dirty_bits[32];
+    printf("[DRAW] forced=%u dirty=%u nondeferrable=%u prim=%u shader=%u\n", pc_gx_flush_reason[1] + pc_gx_flush_reason[2] + pc_gx_flush_reason[3] + pc_gx_flush_reason[4],
+           pc_gx_flush_reason[1], pc_gx_flush_reason[2], pc_gx_flush_reason[3], pc_gx_flush_reason[4]);
+    for (int b = 0; b < 32; b++)
+        if (pc_gx_dirty_bits[b]) printf("[DRAW] dirty bit %d set on %u forced draws\n", b, pc_gx_dirty_bits[b]);
+    extern unsigned int pc_gx_site[8];
+    {   /* [USE] averages per frame over this window; switches come from the site counters read just below */
+        double f = s_use_frames ? (double)s_use_frames : 1.0;
+        printf("[USE] %llu frames: distinct tex %.1f/frame (overflow %u), distinct posmtx %.1f/frame (overflow %u)\n",
+               s_use_frames, s_use_distinct[0] / f, s_use_overflow[0], s_use_distinct[1] / f, s_use_overflow[1]);
+        printf("[USE] per frame: tex loads %.1f, tex slot switches %.1f, texmtx switches %.1f, posmtx loads %.1f, posmtx switches %.1f\n",
+               s_use_loads[0] / f, pc_gx_site[0] / f, pc_gx_site[3] / f, s_use_loads[1] / f, pc_gx_site[6] / f);
+        s_use_distinct[0] = s_use_distinct[1] = s_use_frames = s_use_loads[0] = s_use_loads[1] = 0;
+        s_use_overflow[0] = s_use_overflow[1] = 0;
     }
+    printf("[DRAW] sites: tex_slot=%u tex_params=%u texgen_mtx=%u texgen_num=%u texgen_coord=%u\n",
+           pc_gx_site[0], pc_gx_site[1], pc_gx_site[3], pc_gx_site[4], pc_gx_site[5]);
+    memset(pc_gx_site, 0, sizeof(pc_gx_site));
+    memset(pc_gx_flush_reason, 0, sizeof(pc_gx_flush_reason));
+    memset(pc_gx_dirty_bits, 0, sizeof(pc_gx_dirty_bits));
 }
 
 extern int __real___aeabi_idiv(int, int);

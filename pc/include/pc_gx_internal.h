@@ -73,6 +73,7 @@ typedef struct {
     unsigned char color0[4];
     unsigned char color1[4];
     float texcoord[8][2];
+    float pal; /* 3DS: batch palette offset (3 * slot) of the matrix pair this vertex uses */
 } PCGXVertex;
 
 typedef struct {

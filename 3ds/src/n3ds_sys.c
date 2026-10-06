@@ -114,7 +114,7 @@ static int log_fd = -1; /* sdmc:/3ds/AnimalCrossing/log.txt, unbuffered */
 
 /* Bottom screen: status rows 0-3 (n3ds_status) and a separator, then the live log in rows
  * 5-29. Only the log worker draws on it after start. */
-#define STATUS_ROWS 4
+#define STATUS_ROWS 5 /* FPS, stutter, heap, audio, uptime */
 #define STATUS_COLS 38 /* 40 columns from column 1; a full row would wrap */
 static PrintConsole s_con_log, s_con_status;
 
@@ -345,7 +345,7 @@ static void log_worker(void* arg) {
             for (int i = 0; i < STATUS_ROWS; i++) {
                 if (!(dirty & (1u << i))) continue;
                 s_con_status.cursorX = 1; /* libctru cursor columns start at 1 here: 0 cut the first character */
-                s_con_status.cursorY = i;
+                s_con_status.cursorY = i + 1; /* 1-based like cursorX: row 0 written as -1 wrapped to the bottom line */
                 console_dev->write_r(_REENT, 0, rows[i], STATUS_COLS);
             }
             consoleSelect(&s_con_log);
@@ -485,9 +485,10 @@ static void n3ds_init_consoles(void) {
     consoleInit(GFX_BOTTOM, &s_con_log);
     s_con_status = s_con_log;
     consoleSetWindow(&s_con_status, 0, 0, 40, STATUS_ROWS + 1);
-    consoleSetWindow(&s_con_log, 0, STATUS_ROWS + 1, 40, 30 - STATUS_ROWS - 1);
+    /* row STATUS_ROWS+1 stays blank: a gap between the status block and the log */
+    consoleSetWindow(&s_con_log, 0, STATUS_ROWS + 2, 40, 30 - STATUS_ROWS - 2);
     consoleSelect(&s_con_status);
-    s_con_status.cursorY = STATUS_ROWS;
+    s_con_status.cursorY = STATUS_ROWS + 1; /* separator on row STATUS_ROWS (1-based cursor) */
     printf("---------------------------------------"); /* 39: a 40th column would scroll the window */
     consoleSelect(&s_con_log);
 }

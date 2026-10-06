@@ -22,7 +22,7 @@ static DVLB_s* s_dvlb;
 static shaderProgram_s s_prog;
 
 static struct {
-    int proj, mv, nrm, texmtx0, texmtx1, tgsrc, unitsel;
+    int proj, pmv, pnrm, texmtx0, texmtx1, tgsrc, unitsel; /* pmv/pnrm: batch palette, 3 rows per pair */
     int matReg, matSel, ambReg, ambSel, unlitAcc, lightDir, lightCol, lightLoop, lit;
 } s_u;
 
@@ -41,7 +41,7 @@ int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls" };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls", "nomvflush", "nogxvtx", "palflush", "palone" };
     extern char g_n3ds_args[]; /* n3ds_sys.c: 3dslink arguments */
     char buf[512] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
@@ -51,7 +51,7 @@ static void read_debug_switches(void) {
     }
     strncat(buf, g_n3ds_args, 255);
     if (!buf[0]) return;
-    for (int i = 0; i < 12; i++)
+    for (int i = 0; i < 16; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }
@@ -638,13 +638,18 @@ static void n3ds_fog(void) {
     C3D_FogLutBind(&s_fog_lut);
 }
 
-/* Called from pc_gx_flush_vertices with the dirty groups */
+/* The batch palette (pc_gx.c): n pairs of position 3x4 and normal 3x3, one pair per slot. Slot k uses
+ * shader rows 3k..3k+2. Called right before the batch draws. */
+void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n) {
+    for (int k = 0; k < n; k++) {
+        set_rows(s_u.pmv + 3 * k, pos + 12 * k, 3, 4);
+        set_rows(s_u.pnrm + 3 * k, nrm + 9 * k, 3, 3);
+    }
+}
+
+/* Called from pc_gx_flush_vertices with the dirty groups. MODELVIEW is not here: the palette carries it. */
 void n3ds_gx_upload(unsigned int dirty) {
     if (dirty & PC_GX_DIRTY_PROJECTION) n3ds_projection();
-    if (dirty & PC_GX_DIRTY_MODELVIEW) {
-        set_rows(s_u.mv, &g_gx.pos_mtx[g_gx.current_mtx][0][0], 3, 4);
-        set_rows(s_u.nrm, &g_gx.nrm_mtx[g_gx.current_mtx][0][0], 3, 3);
-    }
     if (dirty & PC_GX_DIRTY_TEXGEN) n3ds_texgen();
     if (dirty & PC_GX_DIRTY_LIGHTING) n3ds_lighting();
     if (dirty & (PC_GX_DIRTY_FOG | PC_GX_DIRTY_PROJECTION)) n3ds_fog();
@@ -665,6 +670,7 @@ void n3ds_tev_bind_main(void) {
     AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);         /* normal */
     AttrInfo_AddLoader(ai, 2, GPU_UNSIGNED_BYTE, 4); /* color0 */
     AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);         /* texcoord0 */
+    AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 1);         /* batch palette offset */
 }
 
 /* GPU self-test (n3ds_gl.c): identity transforms (vertex position = clip position),
@@ -672,8 +678,8 @@ void n3ds_tev_bind_main(void) {
 void n3ds_tev_test_uniforms(int nlights) {
     static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     set_rows(s_u.proj, id, 4, 4);
-    set_rows(s_u.mv, id, 3, 4);
-    set_rows(s_u.nrm, id, 3, 4);
+    set_rows(s_u.pmv, id, 3, 4); /* palette slot 0 = identity; self-test vertices use index 0 */
+    set_rows(s_u.pnrm, id, 3, 4);
     set_rows(s_u.texmtx0, id, 2, 4);
     set_rows(s_u.texmtx1, id, 2, 4);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.tgsrc, 0, 0, 0, 0);
@@ -722,7 +728,7 @@ void pc_gx_tev_init(void) {
 
     shaderInstance_s* vs = s_prog.vertexShader;
 #define LOC(n) s_u.n = shaderInstanceGetUniformLocation(vs, #n)
-    LOC(proj); LOC(mv); LOC(nrm); LOC(texmtx0); LOC(texmtx1); LOC(tgsrc); LOC(unitsel);
+    LOC(proj); LOC(pmv); LOC(pnrm); LOC(texmtx0); LOC(texmtx1); LOC(tgsrc); LOC(unitsel);
     LOC(matReg); LOC(matSel); LOC(ambReg); LOC(ambSel); LOC(unlitAcc);
     LOC(lightDir); LOC(lightCol); LOC(lightLoop); LOC(lit);
 #undef LOC

@@ -282,8 +282,42 @@ int pc_emu64_frame_dl_cmds = 0;
 int pc_emu64_frame_cull_visible = 0;
 int pc_emu64_frame_cull_rejected = 0;
 #ifdef TARGET_3DS
-unsigned int pc_emu64_cmd_ticks[256];
 unsigned int pc_emu64_cmd_calls[256];
+/* [DRAW] diagnostics: forced draws by reason (0 none, 1 dirty, 2 non-deferrable, 3 prim change, 4 shader change) */
+unsigned int pc_gx_flush_reason[5];
+unsigned int pc_gx_dirty_bits[32];
+/* [DRAW] sites: 0 TEXTURES slot changed, 1 TEXTURES params only, 3-5 TEXGEN (see the set sites) */
+unsigned int pc_gx_site[8];
+
+/* 3DS batch palette: the matrix pairs (position 3x4, normal 3x3) that the pending batch uses, by slot.
+ * A vertex carries 3 * slot; the shader reads 3 rows per pair. Uploaded and reset in pc_gx_draw_pending. */
+#define PAL_N 9
+static float s_pal_pos[PAL_N][12], s_pal_nrm[PAL_N][9];
+static int s_pal_n;
+static GLuint s_batch_tex[8]; /* GL textures the pending batch draws with (snapshot at upload) */
+static float s_grp_pal; /* palette offset for the group being submitted */
+extern void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n);
+static void pal_for_group(void) {
+    extern int g_n3ds_dbg;
+    /* Batching is OFF: merged groups render wrong textures (see 3ds/PLAN.md, "Batch merge bug").
+     * Each group draws alone until the merge bug is found. */
+    pc_gx_draw_pending();
+    /* g_n3ds_dbg is read again below for "palone" */
+    const float* p = &g_gx.pos_mtx[g_gx.current_mtx][0][0];
+    const float* n = &g_gx.nrm_mtx[g_gx.current_mtx][0][0];
+    for (int k = 0; k < s_pal_n; k++) {
+        if (!memcmp(s_pal_pos[k], p, sizeof(s_pal_pos[k])) && !memcmp(s_pal_nrm[k], n, sizeof(s_pal_nrm[k]))) {
+            s_grp_pal = (float)(3 * k);
+            return;
+        }
+    }
+    int cap = (g_n3ds_dbg & 32768) ? 1 : PAL_N; /* debug switch "palone": one matrix pair per batch */
+    if (s_pal_n >= cap) pc_gx_draw_pending(); /* palette full: end the batch; the draw resets s_pal_n */
+    int k = s_pal_n++;
+    memcpy(s_pal_pos[k], p, sizeof(s_pal_pos[k]));
+    memcpy(s_pal_nrm[k], n, sizeof(s_pal_nrm[k]));
+    s_grp_pal = (float)(3 * k);
+}
 #endif
 
 void pc_gx_init(void) {
@@ -445,6 +479,9 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
 
     if (g_gx.pending_verts > 0 && g_gx.pending_verts + (int)nverts > PC_GX_MAX_VERTS)
         pc_gx_draw_pending();
+#ifdef TARGET_3DS
+    pal_for_group(); /* the group's matrix pair gets a palette slot, ends the batch if the palette is full */
+#endif
 
     g_gx.current_primitive = primitive;
     g_gx.current_vtxfmt = vtxfmt;
@@ -481,6 +518,9 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.color0[2] = b;
     g_gx.current_vertex.color0[3] = a;
 
+#ifdef TARGET_3DS
+    g_gx.current_vertex.pal = s_grp_pal;
+#endif
     g_gx.current_vertex.position[0] = x;
     g_gx.current_vertex.position[1] = y;
     g_gx.current_vertex.position[2] = z;
@@ -704,6 +744,11 @@ int pc_gx_draw_call_count = 0;
 void pc_gx_draw_pending(void) {
     int count = g_gx.pending_verts;
     if (count == 0) return;
+#ifdef TARGET_3DS
+    /* the batch's palette goes to the shader before the draw; the next batch starts a new palette */
+    n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
+    s_pal_n = 0;
+#endif
 
     glBindVertexArray(g_gx.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
@@ -749,7 +794,18 @@ void pc_gx_flush_vertices(void) {
     int deferrable = (prim == GX_TRIANGLES || prim == GX_QUADS);
 
     /* Same GL state as the deferred run: absorb the verts, no GL work */
-    if (g_gx.pending_verts > 0 && g_gx.dirty == 0 && deferrable &&
+    unsigned int flush_block = g_gx.dirty;
+#ifdef TARGET_3DS
+    /* debug switch "nomvflush" (bit 4096): timing experiment only, MODELVIEW changes no longer end the batch.
+     * Pixels are wrong with it on. */
+    extern int g_n3ds_dbg;
+    flush_block &= ~PC_GX_DIRTY_MODELVIEW; /* the batch palette carries the matrix per vertex */
+#endif
+#ifdef TARGET_3DS
+    /* a merged batch draws with the textures bound at its upload: any other texture state ends it */
+    if (memcmp(s_batch_tex, g_gx.gl_textures, sizeof(s_batch_tex)) != 0) flush_block |= PC_GX_DIRTY_TEXTURES;
+#endif
+    if (g_gx.pending_verts > 0 && flush_block == 0 && deferrable &&
         prim == g_gx.pending_prim && shader == g_gx.current_shader) {
         g_gx.pending_verts = g_gx.current_vertex_idx;
         pc_profiler_add_time(PC_PROF_TIMER_GX_FLUSH, flush_start);
@@ -757,6 +813,15 @@ void pc_gx_flush_vertices(void) {
     }
 
     /* State is changing: draw the deferred run while GL state still matches it */
+#ifdef TARGET_3DS
+    /* diagnostic: why a draw is forced, and which dirty groups caused it (n3ds_calls.c [DRAW]) */
+    if (g_gx.pending_verts > 0) {
+        int reason = g_gx.dirty ? 1 : (!deferrable ? 2 : (prim != g_gx.pending_prim ? 3 : (shader != g_gx.current_shader ? 4 : 0)));
+        pc_gx_flush_reason[reason]++;
+        for (int b = 0; b < 32; b++)
+            if (g_gx.dirty & (1u << b)) pc_gx_dirty_bits[b]++;
+    }
+#endif
     pc_gx_draw_pending();
 
     if (shader && shader != g_gx.current_shader) {
@@ -779,6 +844,7 @@ void pc_gx_flush_vertices(void) {
         extern void n3ds_gx_upload(unsigned int dirty);
         Uint64 uniform_start = pc_profiler_begin_timer();
         n3ds_gx_upload(g_gx.dirty);
+        memcpy(s_batch_tex, g_gx.gl_textures, sizeof(s_batch_tex)); /* textures this batch will draw with */
         pc_profiler_add_time(PC_PROF_TIMER_UNIFORM_UPLOAD, uniform_start);
     }
 #else
@@ -1163,6 +1229,11 @@ void pc_gx_flush_vertices(void) {
 
     pc_gx_buffer_data_profiled(GL_ARRAY_BUFFER, count * sizeof(PCGXVertex), g_gx.vertex_buffer, GL_STREAM_DRAW);
 
+#ifdef TARGET_3DS
+    /* this draw is not deferred: upload its palette now, then the next batch starts a new one */
+    n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
+    s_pal_n = 0;
+#endif
     Uint64 draw_start = pc_profiler_begin_timer();
     if (prim == GX_QUADS) {
         int num_quads = count / 4;
@@ -1272,7 +1343,19 @@ void GXLoadPosMtxImm(const void* mtx, u32 id) {
     pc_gx_flush_if_begin_complete();
     int slot = id / 3;
     if (slot >= 10) return;
+#ifdef TARGET_3DS
+    {   /* [USE] every load counts toward distinct position matrices per frame (hash of the 12 words) */
+        extern void n3ds_note_use(int kind, unsigned int key);
+        const u32* w = (const u32*)mtx;
+        u32 h = 0;
+        for (int i = 0; i < 12; i++) h = h * 31u + w[i];
+        n3ds_note_use(1, h);
+    }
+#endif
     if (memcmp(g_gx.pos_mtx[slot], mtx, sizeof(float) * 12) == 0) return;
+#ifdef TARGET_3DS
+    pc_gx_site[6]++; /* [USE] position matrix switches */
+#endif
     DIRTY(PC_GX_DIRTY_MODELVIEW);
     memcpy(g_gx.pos_mtx[slot], mtx, sizeof(float) * 12);
 }
@@ -1304,6 +1387,9 @@ void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {
     if (slot < 0 || slot >= 10) return;
     if (memcmp(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12) == 0) return;
     DIRTY(PC_GX_DIRTY_TEXGEN);
+#ifdef TARGET_3DS
+    pc_gx_site[3]++; /* [DRAW] site: TEXGEN from GXLoadTexMtxImm */
+#endif
     memcpy(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12);
 }
 
@@ -1981,6 +2067,9 @@ void GXSetNumTexGens(u8 n) {
     pc_gx_flush_if_begin_complete();
     if (g_gx.num_tex_gens == n) return;
     DIRTY(PC_GX_DIRTY_TEXGEN);
+#ifdef TARGET_3DS
+    pc_gx_site[4]++; /* [DRAW] site: TEXGEN from GXSetNumTexGens */
+#endif
     g_gx.num_tex_gens = n;
 }
 void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, GXBool normalize, u32 postmtx) {
@@ -1992,6 +2081,9 @@ void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, GXBool normalize, u3
             return;
         }
         DIRTY(PC_GX_DIRTY_TEXGEN);
+#ifdef TARGET_3DS
+        pc_gx_site[5]++; /* [DRAW] site: TEXGEN from GXSetTexCoordGen2 */
+#endif
         g_gx.tex_gen_type[dst] = func;
         g_gx.tex_gen_src[dst] = src;
         g_gx.tex_gen_mtx[dst] = mtx;

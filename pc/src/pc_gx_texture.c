@@ -5,6 +5,9 @@
 #include "pc_settings.h"
 #include <dolphin/gx/GXEnum.h>
 #include <stdlib.h>
+#ifdef TARGET_3DS
+extern unsigned int pc_gx_site[8]; /* pc_gx.c: [DRAW] site counters */
+#endif
 
 static int pc_gx_tlut_force_be(void);
 static void decode_rgb5a3_entry(u16 val, u8* r, u8* g, u8* b, u8* a);
@@ -50,6 +53,23 @@ static int gc_format_bpp(u32 format) {
 
 /* FNV-1a hash of texture data to detect buffer reuse with different content.
  * Hashes first 256 + last 256 bytes (or all if <= 512). */
+/* FNV-style over [from, to): 4 bytes per step, then the last bytes one at a time. Same coverage as the
+ * byte loop it replaces, about 4x fewer multiplies (texobj is ~5000 hashes per frame on the 3DS). */
+static u32 fnv_range(const u8* p, int from, int to, u32 h) {
+    int i = from;
+    for (; i + 4 <= to; i += 4) {
+        u32 w;
+        memcpy(&w, p + i, 4);
+        h ^= w;
+        h *= 0x01000193u;
+    }
+    for (; i < to; i++) {
+        h ^= p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
 static u32 tex_content_hash(const void* data, int width, int height, u32 format) {
     if (!data) return 0;
     int bpp = gc_format_bpp(format);
@@ -58,20 +78,11 @@ static u32 tex_content_hash(const void* data, int width, int height, u32 format)
     u32 h = 0x811c9dc5u;
     if (data_size <= 512) {
         /* small texture: hash everything */
-        for (int i = 0; i < data_size; i++) {
-            h ^= p[i];
-            h *= 0x01000193u;
-        }
+        h = fnv_range(p, 0, data_size, h);
     } else {
         /* large texture: sample head + tail */
-        for (int i = 0; i < 256; i++) {
-            h ^= p[i];
-            h *= 0x01000193u;
-        }
-        for (int i = data_size - 256; i < data_size; i++) {
-            h ^= p[i];
-            h *= 0x01000193u;
-        }
+        h = fnv_range(p, 0, 256, h);
+        h = fnv_range(p, data_size - 256, data_size, h);
     }
     return h;
 }
@@ -734,6 +745,13 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
         g_gx.tex_obj_w[id] = width;
         g_gx.tex_obj_h[id] = height;
         g_gx.tex_obj_fmt[id] = (int)format;
+#ifdef TARGET_3DS
+        {   /* [USE] every texture object load counts toward distinct textures per frame */
+            extern void n3ds_note_use(int kind, unsigned int key);
+            n3ds_note_use(0, (unsigned int)tex);
+        }
+        if (slot_changed || params_changed) pc_gx_site[slot_changed ? 0 : 1]++; /* [DRAW] site */
+#endif
         if (slot_changed || params_changed) DIRTY(PC_GX_DIRTY_TEXTURES);
         return;
     }

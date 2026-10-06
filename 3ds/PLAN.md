@@ -173,7 +173,7 @@ Running list. Add items as they come up. Tick them off with the measurement that
 - [ ] **3DSX size (7.5 MB).** `.text` 3.32 MB, `.rodata` 1.37 MB, `.data` 2.54 MB. Largest symbols: `s_assets` (rodata, 347 KB), `data_bgd` (data, 317 KB), `.LC2` (rodata, 215 KB). Options: move assets off the image, or build cold code with `-Os`. Breakdown of the rest of `.data` not done.
 - [ ] **emu64 opcode 0x0A (`G_TRIN_INDEPEND` → `dl_G_TRIN`, `emu64.c:4798`).** About 70% of handler time. About 125k calls per 600 frames. Main target for step 3.
 - [ ] **`idiv` callers.** 48k to 76k calls per 600 frames, about 80 to 130 per frame. Earlier note said negligible. That was wrong. Resolve `0x3d2e54`, `0x3af344`, `0x3b1114` with addr2line.
-- [ ] **Frame rate after boot.** Hardware: 10 to 17 fps, 568 stutters per 600 frames. Bigger problem than boot time.
+- [ ] **Frame rate in game.** Hardware: 10 to 18 fps in game, 568 stutters per 600 frames in one window. Target 60 fps. Bigger problem than boot time.
 - [ ] **Remove the emu64 opcode timing.** The `calls`-switch timing adds two tick reads per opcode and inflates absolute ms. Remove once the step 3 target is chosen.
 
 ## TODO
@@ -198,9 +198,24 @@ Running list. Add items as they come up. Tick them off with the measurement that
   be moved at all. `m_train_control.c`'s `train_control_state` is a lead, not a cause. Needs
   either a hardware round trip with targeted logging, or scripted input in Azahar to
   reproduce the train sequence without a human driving it; neither is done yet.
+- **No controls in game (user report, broader than the train case).** The player character cannot be
+  moved in game. Not yet confirmed whether it matches the train case above. Not investigated.
+- **Nintendo logo missing before the title, first boot only (intermittent).** Logo does not show
+  on the first boot, and sometimes on later boots. Related to the skipped `proc()` path in the
+  "Restore the Nintendo logo" TODO above. Not investigated.
+- **Title preview movement wrong.** The character in the title-screen demo walks into walls and
+  corners more than expected. Suspect the input replay the title demo uses. Not investigated.
+- **HOME then X to close crashes the system with a stack dump.** Pressing HOME, then X to close the
+  app, crashes the 3DS and prints a stack dump. Not investigated. Check the crash dump files and the
+  `[CRASH]` log lines first.
 
 ## Known issues
 
+- **Batch merge bug (batching OFF).** Merging draw groups into one batch (per-vertex matrix palette,
+  `pc_gx.c` `pal_for_group`) renders wrong textures and placement on the title screen. Bisect:
+  one draw per group is correct (`palflush`); merging only groups with the same matrix pair is wrong
+  (`palone`); a texture-state guard did not fix it. Not found yet. Batching is off in
+  `pal_for_group` until this is fixed.
 - **O3DS audio queue overflow.** `SendStart::Mesg Full Queue` (now rate-limited to one line per 600
   drops). The mixer costs ~2.1 ms per audio frame and reaches 57–60 frames/s while it runs, so CPU
   cost is not the cause; the audio thread stalls at times on the time-limited core 1. Dropped

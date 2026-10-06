@@ -2,7 +2,7 @@
 ; Position transform, GX channel-0 lighting per vertex, and two texgens
 ; routed to the three PICA texture units. Fog is done by the PICA fog unit.
 
-.fvec proj[4], mv[3], nrm[3]
+.fvec proj[4], pmv[27], pnrm[27]  ; batch palette: 9 matrix pairs, 3 rows each
 .fvec texmtx0[2], texmtx1[2]
 .fvec tgsrc            ; x: texgen 0 reads the normal, y: texgen 1 (1 or 0)
 .fvec unitsel[3]       ; per texture unit: x = weight of texgen 0, y = texgen 1
@@ -28,14 +28,17 @@
 .alias innrm v1
 .alias inclr v2
 .alias intc v3
+.alias inpal v4          ; palette offset (3 * slot) of this vertex's matrix pair
 
 .proc main
-	; eye = mv * (pos, 1); clip = proj * eye
+	; a0.x = palette offset of this vertex's matrix pair
+	mova a0.x, inpal.x
+	; eye = pmv * (pos, 1); clip = proj * eye
 	mov r0.xyz, inpos
 	mov r0.w, ones
-	dp4 r1.x, mv[0], r0
-	dp4 r1.y, mv[1], r0
-	dp4 r1.z, mv[2], r0
+	dp4 r1.x, pmv[a0.x + 0], r0
+	dp4 r1.y, pmv[a0.x + 1], r0
+	dp4 r1.z, pmv[a0.x + 2], r0
 	mov r1.w, ones
 	dp4 outpos.x, proj[0], r1
 	dp4 outpos.y, proj[1], r1
@@ -43,9 +46,9 @@
 	dp4 outpos.w, proj[3], r1
 
 	; r2 = (normalize(nrm * n), 1)
-	dp3 r2.x, nrm[0], innrm
-	dp3 r2.y, nrm[1], innrm
-	dp3 r2.z, nrm[2], innrm
+	dp3 r2.x, pnrm[a0.x + 0], innrm
+	dp3 r2.y, pnrm[a0.x + 1], innrm
+	dp3 r2.z, pnrm[a0.x + 2], innrm
 	dp3 r3.x, r2, r2
 	rsq r3.x, r3.x
 	mul r2.xyz, r2, r3.xxx
