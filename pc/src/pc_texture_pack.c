@@ -704,7 +704,9 @@ void pc_texture_pack_init(void) {
     memset(g_loaded_cache, 0, sizeof(g_loaded_cache));
     memset(g_neg_cache_valid, 0, sizeof(g_neg_cache_valid));
 
+#ifndef TARGET_3DS /* the hash code itself never changes; skip the boot-time cost on 3DS */
     xxhash64_selftest();
+#endif
 
     check_compressed_texture_support();
 

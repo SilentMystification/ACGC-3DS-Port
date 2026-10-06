@@ -215,6 +215,8 @@ static void free_deleted_textures(void) {
 static volatile const char* s_step = "boot";
 static char s_step_buf[64];
 static volatile u32 s_frames_done;
+static int s_apt_ok = 1; /* last aptMainLoop result; 0 = the app must close */
+int n3ds_apt_ok(void) { return s_apt_ok; }
 
 #define DRAW_RECS 48
 typedef struct {
@@ -258,9 +260,20 @@ static void report_gpu_hang(u32 frame) {
 static void watchdog_thread(void* arg) {
     extern void n3ds_log_raw(const char* s);
     (void)arg;
-    u32 last = 0, still = 0, reported = 0;
+    extern u32 n3ds_log_lock_held_ms(u32* owner);
+    u32 last = 0, still = 0, reported = 0, lock_reported = 0;
     for (;;) {
         svcSleepThread(1000000000LL);
+        u32 owner, held = n3ds_log_lock_held_ms(&owner);
+        if (held > 500 && !lock_reported) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "[LOCK] log lock held %lu ms by thread %08lx (deadlock or a blocking call inside it)\n",
+                     (unsigned long)held, (unsigned long)owner);
+            n3ds_log_raw(msg);
+            lock_reported = 1;
+        } else if (!held) {
+            lock_reported = 0;
+        }
         u32 now = s_frames_done;
         if (now != last) { last = now; still = 0; reported = 0; continue; }
         if (++still >= 3 && !reported) {
@@ -413,6 +426,15 @@ static void perf_frame(void) {
     sum_frames += n; sum_ticks += win_ticks; sum_stutters += stutters;
     sum_draws += s_stat_draws; sum_verts += s_stat_verts;
     if (worst > sum_worst) sum_worst = worst;
+
+    extern void pc_gx_texture_work_stats(u32* lookups, u32* scan_total, u32* uploads);
+    u32 tex_lookups, tex_scan, tex_uploads;
+    pc_gx_texture_work_stats(&tex_lookups, &tex_scan, &tex_uploads);
+    printf("[WORK] vtx_bytes/f %lu  draws/f %lu  tex_lookups %lu scan_steps %lu (%.1f/lookup) uploads %lu\n",
+           (unsigned long)(s_stat_verts * sizeof(N3DSVtx) / (n ? n : 1)), (unsigned long)(s_stat_draws / n),
+           (unsigned long)tex_lookups, (unsigned long)tex_scan,
+           tex_lookups ? (double)tex_scan / tex_lookups : 0.0, (unsigned long)tex_uploads);
+
     /* first lines early (frames 60 and 180), so a hang in the first seconds still leaves numbers */
     static u32 total_frames;
     total_frames += n;
@@ -422,6 +444,8 @@ static void perf_frame(void) {
                (unsigned long)(s_stat_verts / n), C3D_GetDrawingTime(), C3D_GetProcessingTime(),
                (unsigned long)heap, (unsigned long)lin);
     if (sum_frames >= 600) {
+        extern int g_n3ds_dbg; /* n3ds_tev.c; 2048 = calls */
+        if (g_n3ds_dbg & 2048) { extern void n3ds_calls_report(void); extern void n3ds_emu64_report(void); n3ds_calls_report(); n3ds_emu64_report(); }
         float s = (float)sum_ticks / (float)SYSCLOCK_ARM11;
         printf("[PERF] %.0fs: %.1f fps, worst %.1fms, %lu stutters, %lu draws %lu vtx/frame, heap %luK linear %luK free, audio mix %.2fms\n",
                s, sum_frames / s, sum_worst, (unsigned long)sum_stutters, (unsigned long)(sum_draws / sum_frames),
@@ -449,6 +473,10 @@ void n3ds_gl_swap(void) {
     memcpy(s_recs[1], s_recs[0], sizeof(s_recs[0]));
     s_nrecs[1] = s_nrecs[0];
     s_frames_done++;
+    /* APT (HOME, sleep, exit) between frames, as devkitPro programs do: never inside a
+     * C3D frame. A HOME press suspends this thread in here until the app is resumed. */
+    s_step = "inside aptMainLoop (HOME/sleep handling)";
+    s_apt_ok = aptMainLoop();
     s_step = "game code (after FrameEnd)";
     s_in_frame = 0;
     perf_frame();
@@ -644,11 +672,17 @@ static void gl_tex_image_2d(GLenum target, GLint level, GLint ifmt, GLsizei w, G
 
     u8* out = (u8*)t->tex.data;
     u32 tiles_w = pw >> 3;
+    /* Column source index per output column: a table, not a divide per texel. Most GC
+     * textures are already power-of-two (w == pw), so this is then just mx (no table work). */
+    static u32 colsrc[1024];
+    int col_identity = (u32)w == pw;
+    if (!col_identity) for (u32 mx = 0; mx < pw; mx++) colsrc[mx] = mx * (u32)w / pw;
     for (u32 my = 0; my < ph; my++) {
-        /* PICA samples t = 0 at the last row in memory */
+        /* PICA samples t = 0 at the last row in memory. ph is at most 1024, so this row
+         * divide (not per texel) is cheap; only the per-texel column lookup matters. */
         const u8* row = px + (size_t)(((ph - 1 - my) * (u32)h / ph) * (u32)w) * 4;
         for (u32 mx = 0; mx < pw; mx++) {
-            const u8* p = row + (size_t)(mx * (u32)w / pw) * 4;
+            const u8* p = row + (size_t)(col_identity ? mx : colsrc[mx]) * 4;
             u32 idx = ((my >> 3) * tiles_w + (mx >> 3)) * 64 + morton8(mx & 7, my & 7);
             switch (tf) {
                 case GPU_LA8: out[idx * 2] = p[3]; out[idx * 2 + 1] = p[0]; break;

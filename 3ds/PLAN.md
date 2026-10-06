@@ -159,6 +159,46 @@ GPU. On Vita, emu64 was ~92% of frame time, so profile emu64 early.
 Stereoscopic 3D (N3DS first), touch UI, CIA packaging (more memory via a larger system mode),
 settings menu.
 
+## Optimization TODO
+
+Running list. Add items as they come up. Tick them off with the measurement that closed them.
+
+- [ ] **Boot: remove the 2.5 s Nintendo wait.** `sound_initial()` (`src/static/boot.c`) calls `msleep(2500)`.
+  Skipped on 3DS in the working tree. Open: check the jingle on hardware. If silent or cut short, restore the wait for 3DS.
+- [ ] **Boot: add timestamps to the trademark, logo, and title log lines.** Needed to measure time to title. Not done.
+- [ ] **Boot: speed up the Yaz0 decoder.** `yaz0_decode` (`pc/src/pc_disc.c`) copies one byte at a time. Measured decode of 15273 KB: 0.78 s on hardware. Use `memcpy` for non-overlapping back-references. Not done.
+- [ ] **Boot: do not cache the decoded REL on SD.** Measured: 15.3 MB SD read about 1.5 s, versus 0.78 s decode. Caching the compressed file saves nothing.
+- [ ] **Boot: RARC archive loads to ARAM.** About 6.6 MB read from the ISO (`forest_1st`, `forest_2nd`, `famicom`). Check whether these overlap with the decode or can start earlier.
+- [ ] **Logging overhead.** Not measured. Game-thread cost per write is a lock, a copy, and a signal. Test: an A/B run with the tee returning early, then compare `[BOOT]` and `[PERF]`.
+- [ ] **3DSX size (7.5 MB).** `.text` 3.32 MB, `.rodata` 1.37 MB, `.data` 2.54 MB. Largest symbols: `s_assets` (rodata, 347 KB), `data_bgd` (data, 317 KB), `.LC2` (rodata, 215 KB). Options: move assets off the image, or build cold code with `-Os`. Breakdown of the rest of `.data` not done.
+- [ ] **emu64 opcode 0x0A (`G_TRIN_INDEPEND` → `dl_G_TRIN`, `emu64.c:4798`).** About 70% of handler time. About 125k calls per 600 frames. Main target for step 3.
+- [ ] **`idiv` callers.** 48k to 76k calls per 600 frames, about 80 to 130 per frame. Earlier note said negligible. That was wrong. Resolve `0x3d2e54`, `0x3af344`, `0x3b1114` with addr2line.
+- [ ] **Frame rate after boot.** Hardware: 10 to 17 fps, 568 stutters per 600 frames. Bigger problem than boot time.
+- [ ] **Remove the emu64 opcode timing.** The `calls`-switch timing adds two tick reads per opcode and inflates absolute ms. Remove once the step 3 target is chosen.
+
+## TODO
+
+- **Restore the Nintendo logo / progressive-scan screen.** `osCreateThread2`/`osStartThread`
+  (`pc/src/pc_os.c`) are PC-port stubs: they record the OSThread entry point and then drop it
+  without calling it. `initial_menu_init()`'s `proc()` thread (`src/static/initial_menu.c`) is
+  what draws `logo_ninT_model` (the Nintendo logo) and waits up to `limit_time` (5-10 s) for a
+  button press before fading to the title. Because `proc()` never runs, boot goes straight from
+  `initial_menu_init()` to `dvderr_init` with nothing drawn and no wait. This was already the
+  case before the 3DS port (inherited from the PC port) and currently makes 3DS test round
+  trips faster, so it is left as-is for now. To restore it, give `osStartThread` a real path to
+  call `pending_thread_entry` (a cooperative step each frame, or a real SDL/3DS thread), and
+  re-test the 10 s boot wait this adds back once other work does not need the shorter round trip.
+
+## Known issues (future TODOs, not yet investigated)
+
+- **Stale frame behind a text box.** When a text box shows up, an old frame appears to be
+  displayed with it. Possibly a stale EFB copy. Not yet investigated.
+- **No player control after exiting the train at game start.** Controls work in the train
+  to set the player name. After leaving it, the Select menu opens, but the character cannot
+  be moved at all. `m_train_control.c`'s `train_control_state` is a lead, not a cause. Needs
+  either a hardware round trip with targeted logging, or scripted input in Azahar to
+  reproduce the train sequence without a human driving it; neither is done yet.
+
 ## Known issues
 
 - **O3DS audio queue overflow.** `SendStart::Mesg Full Queue` (now rate-limited to one line per 600

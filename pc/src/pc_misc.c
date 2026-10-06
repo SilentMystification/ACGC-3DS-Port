@@ -173,17 +173,9 @@ void __isync(void) {}
 void InitMetroTRK(void) {}
 void InitMetroTRK_BBA(void) {}
 
-/* --- N64 fixed-point trig --- */
-#include <math.h>
-short sins(unsigned short angle) {
-    double rad = (double)angle * (2.0 * PC_PI / 65536.0);
-    return (short)(sin(rad) * 32767.0);
-}
-
-short coss(unsigned short angle) {
-    double rad = (double)angle * (2.0 * PC_PI / 65536.0);
-    return (short)(cos(rad) * 32767.0);
-}
+/* sins/coss: the real table (src/static/libultra/gu/sins.c, coss.c) is in the build now;
+ * it replaced a double sin()/cos() fallback here that an Azahar [CALLS] profile showed
+ * running ~723 times/frame combined. */
 
 void __OSUnhandledException(u8 type, void* ctx, u32 dsisr, u32 dar) {
     (void)type; (void)ctx; (void)dsisr; (void)dar;

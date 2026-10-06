@@ -13,6 +13,14 @@ extern int g_pc_verbose;
 enum { SRC_REL = 0, SRC_DOL = 1, SRC_NONE = 2 };
 enum { SWAP_NONE = 0, SWAP_U16 = 1, SWAP_VTX = 2, SWAP_U32 = 3 };
 
+#ifndef PC_BOOT_MARK /* same as pc_platform.h */
+#ifdef TARGET_3DS
+void n3ds_boot_mark(const char* fmt, ...);
+#define PC_BOOT_MARK(...) n3ds_boot_mark(__VA_ARGS__)
+#else
+#define PC_BOOT_MARK(...) ((void)0)
+#endif
+#endif
 static u8* g_rel_data = NULL;
 static u8* g_dol_data = NULL;
 
@@ -29898,6 +29906,7 @@ int pc_assets_init(void) {
                       s_assets[i].rom_off, s_assets[i].rom_src, s_assets[i].swap);
         loaded++;
     }
+    PC_BOOT_MARK("central asset table copied (%d assets)", total);
 
     /* Load static arrays via per-file init functions */
     _pc_load_src_actor_ac_boat_demo_c();
@@ -30676,6 +30685,7 @@ int pc_assets_init(void) {
     /* Free ROM data */
     if (g_rel_data) { free(g_rel_data); g_rel_data = NULL; }
     if (g_dol_data) { free(g_dol_data); g_dol_data = NULL; }
+    PC_BOOT_MARK("all assets copied, DOL and REL freed");
 
     if (g_pc_verbose)
         printf("[PC] Assets: %d loaded (%s)\n", loaded, rom_mode ? "ROM-direct" : ".bin fallback");

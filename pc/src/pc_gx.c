@@ -146,19 +146,21 @@ static void pc_gx_dl_write(const void* data, u32 len) {
 
 static void pc_unpack_rgba8f(u32 packed, float* out_rgba) {
     /* Shift-based: works for colors packed as (r<<24|g<<16|b<<8|a) from N64 DL data */
-    out_rgba[0] = ((packed >> 24) & 0xFF) / 255.0f;
-    out_rgba[1] = ((packed >> 16) & 0xFF) / 255.0f;
-    out_rgba[2] = ((packed >> 8) & 0xFF) / 255.0f;
-    out_rgba[3] = (packed & 0xFF) / 255.0f;
+    const float r255a = 1.0f / 255.0f; /* a divide is a slow VFP11 op; multiply by the reciprocal */
+    out_rgba[0] = ((packed >> 24) & 0xFF) * r255a;
+    out_rgba[1] = ((packed >> 16) & 0xFF) * r255a;
+    out_rgba[2] = ((packed >> 8) & 0xFF) * r255a;
+    out_rgba[3] = (packed & 0xFF) * r255a;
 }
 
 /* Byte-based: reads RGBA from memory order. Use for GXColor structs (not N64 DL data). */
 static void pc_unpack_gxcolor_f(u32 color_as_u32, float* out_rgba) {
     const u8* bytes = (const u8*)&color_as_u32;
-    out_rgba[0] = bytes[0] / 255.0f;
-    out_rgba[1] = bytes[1] / 255.0f;
-    out_rgba[2] = bytes[2] / 255.0f;
-    out_rgba[3] = bytes[3] / 255.0f;
+    const float r255b = 1.0f / 255.0f;
+    out_rgba[0] = bytes[0] * r255b;
+    out_rgba[1] = bytes[1] * r255b;
+    out_rgba[2] = bytes[2] * r255b;
+    out_rgba[3] = bytes[3] * r255b;
 }
 
 /* Map tex matrix ID to slot: raw 0..9, GX enum 30..57 (stride 3), or 60=identity */
@@ -279,6 +281,10 @@ int pc_emu64_frame_vtx_cmds = 0;
 int pc_emu64_frame_dl_cmds = 0;
 int pc_emu64_frame_cull_visible = 0;
 int pc_emu64_frame_cull_rejected = 0;
+#ifdef TARGET_3DS
+unsigned int pc_emu64_cmd_ticks[256];
+unsigned int pc_emu64_cmd_calls[256];
+#endif
 
 void pc_gx_init(void) {
     memset(&g_gx, 0, sizeof(g_gx));
@@ -507,10 +513,10 @@ void GXNormal3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.normal[2] = z;
 }
 void GXNormal3s16(s16 x, s16 y, s16 z) {
-    GXNormal3f32(x / 32767.0f, y / 32767.0f, z / 32767.0f);
+    GXNormal3f32(x * (1.0f / 32767.0f), y * (1.0f / 32767.0f), z * (1.0f / 32767.0f));
 }
 void GXNormal3s8(s8 x, s8 y, s8 z) {
-    GXNormal3f32(x / 127.0f, y / 127.0f, z / 127.0f);
+    GXNormal3f32(x * (1.0f / 127.0f), y * (1.0f / 127.0f), z * (1.0f / 127.0f));
 }
 void GXNormal1x16(u16 index) {
     if (g_gx.array_base[GX_VA_NRM]) {
@@ -1567,7 +1573,7 @@ void GXSetTevColor(u32 id, u32 color_packed) {
 void GXSetTevColorS10(u32 id, s16 r, s16 g, s16 b, s16 a) {
     pc_gx_flush_if_begin_complete();
     if (id < GX_MAX_TEVREG) {
-        float c[4] = { r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f };
+        float c[4] = { r * (1.0f / 255.0f), g * (1.0f / 255.0f), b * (1.0f / 255.0f), a * (1.0f / 255.0f) };
         if (memcmp(g_gx.tev_colors[id], c, sizeof(c)) == 0) return;
         DIRTY(PC_GX_DIRTY_TEV_COLORS);
         memcpy(g_gx.tev_colors[id], c, sizeof(c));
@@ -1692,7 +1698,7 @@ void GXSetCoPlanar(GXBool enable) { (void)enable; }
 /* --- Fog --- */
 void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
     pc_gx_flush_if_begin_complete();
-    float c[4] = { color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f };
+    float c[4] = { color.r * (1.0f / 255.0f), color.g * (1.0f / 255.0f), color.b * (1.0f / 255.0f), color.a * (1.0f / 255.0f) };
     if (g_gx.fog_type == (int)type && g_gx.fog_start == startz &&
         g_gx.fog_end == endz && g_gx.fog_near == nearz && g_gx.fog_far == farz &&
         memcmp(g_gx.fog_color, c, sizeof(c)) == 0) return;
@@ -2003,11 +2009,11 @@ void GXSetTexCoordBias(u32 coord, u8 s, u8 t) { (void)coord; (void)s; (void)t; }
 
 /* --- Framebuffer / Copy --- */
 void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
-    g_gx.clear_color[0] = clear_clr.r / 255.0f;
-    g_gx.clear_color[1] = clear_clr.g / 255.0f;
-    g_gx.clear_color[2] = clear_clr.b / 255.0f;
-    g_gx.clear_color[3] = clear_clr.a / 255.0f;
-    g_gx.clear_depth = clear_z / (float)0x00FFFFFF;
+    g_gx.clear_color[0] = clear_clr.r * (1.0f / 255.0f);
+    g_gx.clear_color[1] = clear_clr.g * (1.0f / 255.0f);
+    g_gx.clear_color[2] = clear_clr.b * (1.0f / 255.0f);
+    g_gx.clear_color[3] = clear_clr.a * (1.0f / 255.0f);
+    g_gx.clear_depth = clear_z * (1.0f / (float)0x00FFFFFF);
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {

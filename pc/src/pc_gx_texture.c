@@ -100,10 +100,45 @@ static int tex_cache_count = 0;
 static int tex_cache_hits = 0;
 static int tex_cache_misses = 0;
 
-/* Linear scan. Fine for <=2048 entries at ~100% hit rate. */
+/* data_ptr bucket index, so a lookup touches a short chain instead of scanning every
+ * entry: a 2048-entry scan is ~96KB, 6x the ARM11's 16KB D-cache. Chained via tex_cache
+ * indices (short, no malloc). data_ptr alone spreads well: it is the GC texture's data
+ * address, almost always distinct per texture. */
+#define TEX_HASH_BUCKETS 256
+static s16 tex_hash_head[TEX_HASH_BUCKETS];
+static s16 tex_hash_next[TEX_CACHE_SIZE];
+static int tex_cache_scan_steps; /* [WORK]: chain length actually walked, this lookup */
+static u32 s_work_lookups, s_work_scan_total, s_work_uploads; /* [WORK]: since the last read */
+
+/* [WORK] counters for n3ds_gl.c's perf_frame: lookups and total chain steps walked (bucket
+ * index health), and texture uploads (cache misses), since the last call. */
+void pc_gx_texture_work_stats(u32* lookups, u32* scan_total, u32* uploads) {
+    *lookups = s_work_lookups; *scan_total = s_work_scan_total; *uploads = s_work_uploads;
+    s_work_lookups = s_work_scan_total = s_work_uploads = 0;
+}
+
+static u32 tex_hash_bucket(u32 data_ptr) { return (data_ptr >> 4) & (TEX_HASH_BUCKETS - 1); }
+
+static void tex_hash_clear(void) { memset(tex_hash_head, -1, sizeof(tex_hash_head)); }
+
+static void tex_hash_add(int i) {
+    u32 b = tex_hash_bucket(tex_cache[i].data_ptr);
+    tex_hash_next[i] = tex_hash_head[b];
+    tex_hash_head[b] = (s16)i;
+}
+
+/* After an eviction shifts every surviving entry's index, rebuild from scratch. This runs
+ * only when the cache is full (not every frame). */
+static void tex_hash_rebuild(void) {
+    tex_hash_clear();
+    for (int i = 0; i < tex_cache_count; i++) tex_hash_add(i);
+}
+
 static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tlut_name,
                                      u32 tlut_ptr, u32 tlut_hash, u32 data_hash) {
-    for (int i = 0; i < tex_cache_count; i++) {
+    tex_cache_scan_steps = 0;
+    for (s16 i = tex_hash_head[tex_hash_bucket(data_ptr)]; i >= 0; i = tex_hash_next[i]) {
+        tex_cache_scan_steps++;
         TexCacheEntry* e = &tex_cache[i];
         if (e->data_ptr == data_ptr && e->width == w && e->height == h &&
             e->format == fmt && e->tlut_name == tlut_name && e->tlut_ptr == tlut_ptr &&
@@ -131,8 +166,10 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
         }
         memmove(&tex_cache[0], &tex_cache[half], (tex_cache_count - half) * sizeof(TexCacheEntry));
         tex_cache_count -= half;
+        tex_hash_rebuild();
     }
-    TexCacheEntry* e = &tex_cache[tex_cache_count++];
+    int idx = tex_cache_count++;
+    TexCacheEntry* e = &tex_cache[idx];
     e->data_ptr = data_ptr;
     e->width = (u16)w;
     e->height = (u16)h;
@@ -146,6 +183,7 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
     e->wrap_t = 0xFFFFFFFF;
     e->min_filter = 0xFFFFFFFF;
     e->external = 0;
+    tex_hash_add(idx);
     return e;
 }
 
@@ -156,12 +194,14 @@ void pc_gx_texture_cache_invalidate(void) {
         }
     }
     tex_cache_count = 0;
+    tex_hash_clear();
 }
 
 void pc_gx_texture_init(void) {
     tex_cache_count = 0;
     tex_cache_hits = 0;
     tex_cache_misses = 0;
+    tex_hash_clear();
     (void)pc_gx_tlut_force_be();
 }
 
@@ -653,6 +693,8 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
     /* cache lookup */
     TexCacheEntry* cached = tex_cache_find(o[TEXOBJ_IMAGE_PTR], width, height, format, tlut_key,
                                            tlut_ptr_key, tlut_hash_key, hash);
+    s_work_lookups++;
+    s_work_scan_total += (u32)tex_cache_scan_steps;
     if (cached) {
         tex_cache_hits++;
         GLuint tex = cached->gl_tex;
@@ -698,6 +740,7 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
 
     /* cache miss */
     tex_cache_misses++;
+    s_work_uploads++;
     pc_gx_draw_pending();
 
     /* try texture pack replacement before decoding */

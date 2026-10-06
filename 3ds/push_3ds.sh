@@ -35,35 +35,5 @@ MSYS_NO_PATHCONV=1 timeout 120 docker run --rm -v "$(pwd)/build3ds:/out:ro" devk
     stdbuf -oL /opt/devkitpro/tools/bin/3dslink -a "$ip" /out/ac_3ds.3dsx -- --verbose "$@"
 
 echo "reading the game's log from $ip:17492 for $secs s"
-py -3 -u - "$ip" "$secs" <<'EOF'
-import socket, sys, time
-ip, secs = sys.argv[1], float(sys.argv[2])
-end = time.time() + secs
-out = open("build3ds/hw_live_log.txt", "wb")
-sock = None
-while sock is None and time.time() < end:
-    try:
-        sock = socket.create_connection((ip, 17492), timeout=2)
-    except OSError:
-        time.sleep(1)  # the game opens the server a few seconds after the upload
-if sock is None:
-    print("no connection to the game's log server (see the 'live log:' line on the bottom screen)")
-    sys.exit(1)
-print("connected")
-sock.settimeout(1)
-while time.time() < end:
-    try:
-        data = sock.recv(4096)
-    except socket.timeout:
-        continue
-    except OSError as e:
-        print("connection lost:", e)
-        break
-    if not data:
-        print("game closed the connection")
-        break
-    out.write(data.replace(b"\r", b""))
-    out.flush()
-    sys.stdout.write(data.decode("utf-8", "replace"))
-EOF
+py -3 -u 3ds/tools/livelog.py "$ip" "$secs" build3ds/hw_live_log.txt
 echo "--- log saved to build3ds/hw_live_log.txt"

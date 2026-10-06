@@ -55,6 +55,14 @@ foreach(pat
         ".*/m_card\\.c$" ".*/emu64_utility\\.c$")
     list(FILTER GAME_C_SOURCES EXCLUDE REGEX "${pat}")
 endforeach()
+# sins.c/coss.c: the real N64 fixed-point sine table (1024 x s16, 2KB). pc_misc.c's
+# sins/coss call double sin()/cos() instead; an Azahar call-count profile ([CALLS]) showed
+# ~723 calls/frame combined from them. Use the original table (also closer to the
+# original game's math than a double sin/cos approximation).
+list(APPEND GAME_C_SOURCES
+    ${DECOMP_ROOT}/src/static/libultra/gu/sins.c
+    ${DECOMP_ROOT}/src/static/libultra/gu/coss.c
+)
 
 foreach(pat
         ".*/AUS/.*" ".*/dolphin/.*" ".*/TRK_MINNOW_DOLPHIN/.*" ".*/Runtime\\.PPCEABI\\.H/.*"
@@ -136,6 +144,7 @@ set(N3DS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_sdl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_gl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_tev.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_calls.c
 )
 
 # libctru exports osGetTime (os.o, pulled in by osGetMemRegionFree etc.), and so does the
@@ -157,7 +166,11 @@ add_library(n3ds_platform OBJECT ${N3DS_SOURCES})
 target_link_libraries(n3ds_platform gx_shader_lib test_shader_lib)
 add_executable(ac_3ds $<TARGET_OBJECTS:n3ds_platform> ${PC_SOURCES} ${FIXNES_SOURCES} ${GAME_C_SOURCES} ${GAME_CXX_SOURCES})
 target_compile_definitions(ac_3ds PRIVATE osGetTime=ac_osGetTime)
-target_link_options(ac_3ds PRIVATE -Wl,--gc-sections)
+# n3ds_calls.c: call counters for slow ARM11 ops, so hot spots are measured, not guessed.
+target_link_options(ac_3ds PRIVATE -Wl,--gc-sections
+    -Wl,--wrap=__aeabi_idiv -Wl,--wrap=__aeabi_uidiv
+    -Wl,--wrap=sinf -Wl,--wrap=cosf -Wl,--wrap=sqrtf -Wl,--wrap=powf
+    -Wl,--wrap=sin -Wl,--wrap=cos -Wl,--wrap=sqrt -Wl,--wrap=pow)
 target_link_libraries(ac_3ds gx_shader_lib test_shader_lib citro3d ctru m)
 
 ctr_create_3dsx(ac_3ds

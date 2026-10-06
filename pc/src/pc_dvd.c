@@ -168,9 +168,18 @@ s32 DVDReadPrio(void* fileInfo, void* buf, s32 length, s32 offset, s32 prio) {
     if (fp == DISC_SENTINEL) {
         /* disc image read */
         u32 base = *dvd_fi_startAddr(fileInfo);
+#ifdef TARGET_3DS
+        u32 t0 = SDL_GetTicks();
+        int ok = pc_disc_read(base + (u32)offset, buf, (u32)length);
+        if (length >= 512 * 1024) /* big reads (audiorom, archives) in the boot timeline */
+            PC_BOOT_MARK("disc read %ld KB at 0x%X in %lu ms", (long)(length >> 10), base + (u32)offset,
+                         (unsigned long)(SDL_GetTicks() - t0));
+        return ok ? length : -1;
+#else
         if (pc_disc_read(base + (u32)offset, buf, (u32)length))
             return length;
         return -1;
+#endif
     }
 
     if (!fp) {

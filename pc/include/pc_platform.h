@@ -40,6 +40,14 @@
 #define PC_ARAM_SIZE          (16 * 1024 * 1024)
 #define PC_FIFO_SIZE          (256 * 1024)
 
+/* Boot timeline: "[BOOT] t=<ms since process start> <what>" on 3DS (3ds/src/n3ds_sys.c) */
+#ifdef TARGET_3DS
+void n3ds_boot_mark(const char* fmt, ...);
+#define PC_BOOT_MARK(...) n3ds_boot_mark(__VA_ARGS__)
+#else
+#define PC_BOOT_MARK(...) ((void)0)
+#endif
+
 #define PC_SPEEDHACK_MULTIPLIER 10.0
 
 #define PC_PI  3.14159265358979323846
@@ -126,6 +134,12 @@ extern int pc_emu64_frame_vtx_cmds;
 extern int pc_emu64_frame_dl_cmds;
 extern int pc_emu64_frame_cull_visible;
 extern int pc_emu64_frame_cull_rejected;
+#ifdef TARGET_3DS
+/* emu64 opcode ticks (osGetCount) per gfx_cmd byte, reset by n3ds_calls_report every 600 frames */
+extern unsigned int pc_emu64_cmd_ticks[256];
+extern unsigned int pc_emu64_cmd_calls[256];
+unsigned long long n3ds_emu64_tick(void); /* n3ds_calls.c: libctru system tick, 268123 per ms */
+#endif
 extern int pc_gx_draw_call_count;
 
 /* --- Audio --- */

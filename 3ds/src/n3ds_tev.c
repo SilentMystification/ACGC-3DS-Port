@@ -35,13 +35,13 @@ struct N3DSTevState { u8 pica, fog, lit, alpha; u8 fmt[3]; u16 w[3], h[3]; } g_n
 C3D_Tex* n3ds_gl_tex(GLuint name); /* n3ds_gl.c: NULL if no usable texture */
 
 /* Render debug switches: words in sdmc:/3ds/AnimalCrossing/debug3ds.txt
- * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex shots noscissor gputest */
-enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32, DBG_SHOTS = 64, DBG_NOSCISSOR = 128, DBG_GPUTEST = 256 };
+ * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex shots noscissor gputest locktest profile calls */
+enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32, DBG_SHOTS = 64, DBG_NOSCISSOR = 128, DBG_GPUTEST = 256, DBG_LOCKTEST = 512, DBG_PROFILE = 1024, DBG_CALLS = 2048 };
 int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest" };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls" };
     extern char g_n3ds_args[]; /* n3ds_sys.c: 3dslink arguments */
     char buf[512] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
@@ -51,7 +51,7 @@ static void read_debug_switches(void) {
     }
     strncat(buf, g_n3ds_args, 255);
     if (!buf[0]) return;
-    for (int i = 0; i < 9; i++)
+    for (int i = 0; i < 12; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }
@@ -738,6 +738,14 @@ void pc_gx_tev_init(void) {
     if (s_dbg & DBG_GPUTEST) {
         extern void n3ds_gl_gputest(void);
         n3ds_gl_gputest();
+    }
+    if (s_dbg & DBG_PROFILE) { /* pc_profiler.c [PROFILE] lines */
+        extern int g_pc_profile_enabled;
+        g_pc_profile_enabled = 1;
+    }
+    if (s_dbg & DBG_LOCKTEST) { /* the watchdog must log "[LOCK] ... held" */
+        extern void n3ds_log_locktest(void);
+        n3ds_log_locktest();
     }
 }
 

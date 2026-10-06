@@ -41,12 +41,19 @@ typedef struct {
 } Item;
 
 static const Item tab_video_items[] = {
+#ifndef TARGET_3DS
+    /* The 3DS top screen is a fixed 400x240 with no window, no exclusive fullscreen, and
+     * no MSAA in the citro3d renderer (3ds/src/n3ds_gl.c): these options would do nothing
+     * (SDL's window calls are no-ops there), so they are hidden instead of shown as dead
+     * controls. "Resolution" in particular used to trigger a pointless 15s confirm dialog
+     * for a change that could never take effect. */
     { "Display",    ITEM_DISPLAY,  0 },
     { "VSync",      ITEM_VSYNC,    0 },
-    { "Max FPS",    ITEM_MAX_FPS,  0 },
     { "MSAA",       ITEM_MSAA,     1 },
-    { "Texture filter", ITEM_TEXTURE_FILTERING, 0 },
     { "Resolution", ITEM_RES,      0 },
+#endif
+    { "Max FPS",    ITEM_MAX_FPS,  0 },
+    { "Texture filter", ITEM_TEXTURE_FILTERING, 0 },
     { "Textures",   ITEM_TEXTURES, 1 },
 };
 

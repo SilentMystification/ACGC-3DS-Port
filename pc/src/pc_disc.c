@@ -7,6 +7,14 @@
 #include <ctype.h>
 #include <dirent.h>
 #include "types.h"
+#ifndef PC_BOOT_MARK /* same as pc_platform.h */
+#ifdef TARGET_3DS
+void n3ds_boot_mark(const char* fmt, ...);
+#define PC_BOOT_MARK(...) n3ds_boot_mark(__VA_ARGS__)
+#else
+#define PC_BOOT_MARK(...) ((void)0)
+#endif
+#endif
 #include "pc_disc.h"
 
 extern int g_pc_verbose;
@@ -391,6 +399,7 @@ u8* pc_disc_extract_dol(void) {
     }
     if (g_pc_verbose)
         printf("[PC] DOL: %u bytes (offset 0x%X)\n", g_dol_size, g_dol_offset);
+    PC_BOOT_MARK("DOL read (%u KB)", g_dol_size >> 10);
     return buf;
 }
 
@@ -414,10 +423,12 @@ u8* pc_disc_extract_rel(void) {
         return NULL;
     }
 
+    PC_BOOT_MARK("REL read (%u KB compressed)", sz >> 10);
     /* Yaz0 decompression if needed */
     if (sz >= 16 && memcmp(raw, "Yaz0", 4) == 0) {
         u32 dec_sz;
         u8* dec = yaz0_decode(raw, sz, &dec_sz);
+        PC_BOOT_MARK("REL Yaz0 decoded (%u KB)", dec ? dec_sz >> 10 : 0);
         free(raw);
         if (!dec) {
             printf("[PC] REL: Yaz0 decompression of foresta.rel.szs failed (reason above)\n");

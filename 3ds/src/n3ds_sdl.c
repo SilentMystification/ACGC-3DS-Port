@@ -26,6 +26,7 @@ struct SDL_Thread {
     Thread handle;
     SDL_ThreadFunction fn;
     void* data;
+    const char* name;
     int status;
 };
 
@@ -33,15 +34,17 @@ extern void n3ds_install_crash_handler(void);
 static void n3ds_thread_entry(void* arg) {
     SDL_Thread* t = (SDL_Thread*)arg;
     n3ds_install_crash_handler();
+    extern void n3ds_log_core(const char* who);
+    n3ds_log_core(t->name ? t->name : "?");
     t->status = t->fn(t->data);
 }
 
 /* Worker threads go to a second core so they do not compete with the game
  * thread: core 2 on N3DS, core 1 (time-limited syscore) on O3DS. */
 SDL_Thread* SDL_CreateThread(SDL_ThreadFunction fn, const char* name, void* data) {
-    (void)name;
     SDL_Thread* t = (SDL_Thread*)calloc(1, sizeof(*t));
     if (!t) return NULL;
+    t->name = name;
     t->fn = fn;
     t->data = data;
 
@@ -305,7 +308,8 @@ void SDL_PumpEvents(void) {}
 
 int SDL_PollEvent(SDL_Event* ev) {
     if (event_pos == 0 && event_count == 0) {
-        if (!aptMainLoop()) {
+        extern int n3ds_apt_ok(void); /* n3ds_gl.c runs aptMainLoop between frames */
+        if (!n3ds_apt_ok()) {
             event_queue[event_count++].type = SDL_QUIT;
         } else {
             hidScanInput();

@@ -5,12 +5,24 @@
 #include "ac_birth_control.h"
 
 PCSettings g_pc_settings = {
+#ifdef TARGET_3DS
+    /* The 3DS top screen is a fixed 400x240; there is no window, no exclusive fullscreen
+     * mode, and no MSAA in the citro3d renderer (3ds/src/n3ds_gl.c). These fields are kept
+     * (settings.ini stays one format) but default to the console's real, only, values. */
+    .window_width  = 400,
+    .window_height = 240,
+    .fullscreen    = 0,
+    .vsync         = 0,
+    .max_fps       = 60,
+    .msaa          = 0,
+#else
     .window_width  = PC_SCREEN_WIDTH,
     .window_height = PC_SCREEN_HEIGHT,
     .fullscreen    = 0,
     .vsync         = 0,
     .max_fps       = 60,
     .msaa          = 4,
+#endif
     .texture_filtering = 1,
     .preload_textures = 0,
     .disable_resetti = 0,

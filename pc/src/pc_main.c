@@ -391,7 +391,9 @@ int main(int argc, char* argv[]) {
     pc_settings_load();
     pc_keybindings_load();
     pc_platform_init();
+    PC_BOOT_MARK("platform up (screens, GPU, log)");
     pc_disc_init();
+    PC_BOOT_MARK("disc image open");
     if (!pc_assets_init()) {
         const char* msg = pc_disc_is_open()
             ? "The disc image was found, but its game data could not be loaded.\n\n"
@@ -407,6 +409,7 @@ int main(int argc, char* argv[]) {
     }
 
     ac_entry();                         /* sets HotStartEntry = &entry */
+    PC_BOOT_MARK("game boot starts (boot_main)");
     boot_main(argc, (const char**)argv); /* full init → HotStartEntry → game loop */
 
     pc_disc_shutdown();

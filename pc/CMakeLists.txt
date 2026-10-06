@@ -222,6 +222,13 @@ list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/libc64/aprintf\\.c$")
 
 # libultra: Exclude most (we have pc_os.c replacements), but keep xprintf for libc64
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/libultra/.*")
+# sins.c/coss.c: the real N64 fixed-point sine table (1024 x s16, 2KB). pc_misc.c's
+# sins/coss call double sin()/cos() instead; a hardware profile showed ~723 calls/frame
+# combined from them. Use the original table (also closer to the original game's math).
+list(APPEND GAME_C_SOURCES
+    ${DECOMP_ROOT}/src/static/libultra/gu/sins.c
+    ${DECOMP_ROOT}/src/static/libultra/gu/coss.c
+)
 
 # Exclude PPC-specific files
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/ReconfigBATs\\.c$")
