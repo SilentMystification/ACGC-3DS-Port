@@ -1,0 +1,20 @@
+; test_in4.v.pica - GPU self-test B2: the game's 4 inputs all read, only 2 outputs.
+.constf consts(1.0, 0.00392156862745, 0.0, 0.0)
+.alias ones consts.xxxx
+.alias inv255 consts.yyyy
+.alias zeros consts.zzzz
+
+.out outpos position
+.out outclr color
+
+.proc main
+	mov r0.xyz, v0
+	add r1, zeros, v1      ; normal
+	add r2, zeros, v3      ; texcoord
+	dp3 r1.x, r1, r1
+	add r0.x, r0.x, r2.z   ; texcoord.z is 0
+	mov outpos.xyz, r0
+	mov outpos.w, ones
+	mul outclr, inv255, v2
+	end
+.end

@@ -236,7 +236,8 @@ void OSInit(void) {
     if (!arena_memory) {
         arena_memory = (u8*)malloc(PC_MAIN_MEMORY_SIZE);
         if (!arena_memory) {
-            fprintf(stderr, "Failed to allocate main memory arena\n");
+            fprintf(stderr, "[PC/OS] FATAL: out of memory: could not allocate the %u-byte main memory arena\n",
+                    (unsigned)PC_MAIN_MEMORY_SIZE);
             exit(1);
         }
         memset(arena_memory, 0, PC_MAIN_MEMORY_SIZE);

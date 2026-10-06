@@ -41,7 +41,7 @@ static int pc_audio_producer_func(void* data) {
         int fill = pc_audio_get_buffer_fill();
         if (fill < AUDIO_PRODUCE_THRESHOLD) {
 #ifdef TARGET_3DS
-            /* producer throughput: audio frames/s and mix cost, every 2s */
+            /* producer throughput: audio frames/s and mix cost, every 2s, to the status rows */
             static Uint64 stat_start, stat_busy;
             static int stat_frames;
             Uint64 t0 = SDL_GetPerformanceCounter();
@@ -52,8 +52,9 @@ static int pc_audio_producer_func(void* data) {
             stat_frames++;
             if (t1 - stat_start >= 2 * SDL_GetPerformanceFrequency()) {
                 double secs = (double)(t1 - stat_start) / SDL_GetPerformanceFrequency();
-                printf("[AUDIO] %.1f frames/s, mix %.2f ms/frame, fill=%d\n", stat_frames / secs,
-                       stat_busy * 1000.0 / SDL_GetPerformanceFrequency() / stat_frames, fill);
+                extern float g_n3ds_audio_fps, g_n3ds_audio_mix_ms; /* 3ds/src/n3ds_gl.c */
+                g_n3ds_audio_fps = (float)(stat_frames / secs);
+                g_n3ds_audio_mix_ms = (float)(stat_busy * 1000.0 / SDL_GetPerformanceFrequency() / stat_frames);
                 stat_start = t1;
                 stat_busy = 0;
                 stat_frames = 0;

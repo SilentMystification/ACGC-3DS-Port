@@ -105,6 +105,7 @@ void VIWaitForRetrace(void) {
     }
 
     /* report slow frames (>20ms = missed 60fps by >4ms) */
+#ifndef TARGET_3DS /* 3DS: stutters are counted in the bottom-screen status and [PERF] lines */
     if (frame_ms > 20.0 && g_pc_verbose) {
         double swap_ms = (double)(t_after_swap - t_before_swap) * 1000.0 / (double)perf_freq;
         double pace_ms = (double)(t_after_pace - t_before_pace) * 1000.0 / (double)perf_freq;
@@ -113,6 +114,7 @@ void VIWaitForRetrace(void) {
         printf("[STUTTER] frame %lu: total=%.1fms work=%.1fms swap=%.1fms pace=%.1fms audio_fill=%d\n",
                (unsigned long)pc_frame_counter, frame_ms, work_ms - swap_ms - pace_ms, swap_ms, pace_ms, audio_fill);
     }
+#endif
 
     pc_profiler_end_frame(profile_frame_ms, pc_audio_get_buffer_fill());
 

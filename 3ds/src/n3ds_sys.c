@@ -8,12 +8,18 @@
  */
 #include <3ds.h>
 #include <malloc.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <sys/iosupport.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
 
 /* linearAlloc pool: GPU buffers, textures, audio. O3DS homebrew gets ~64MB total and the
  * game needs 24MB main RAM + 16MB ARAM + assets, so keep this small. */
@@ -27,6 +33,14 @@ extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
 
 /* Replaces libctru's weak default (libctru 2.7 allocateHeaps.c, same steps).
  * One linear allocation holds both pools: [ linearAlloc pool | newlib malloc heap ]. */
+static s64 s_commit_max, s_commit_cur; /* logged in n3ds_platform_init */
+
+/* socInit turns its buffer into a shared memory block, and the kernel refuses linear
+ * memory for that; the whole newlib heap is linear here. So this much of the quota is kept
+ * out of the linear block and mapped as normal memory by the live log.
+ * ponytail: 1 MB of heap for a development feature; set 0 for a release build. */
+#define N3DS_SOC_SIZE 0x100000
+
 void __system_allocateHeaps(void) {
     Handle reslimit = 0;
     if (R_FAILED(svcGetResourceLimit(&reslimit, CUR_PROCESS_HANDLE))) svcBreak(USERBREAK_PANIC);
@@ -35,8 +49,15 @@ void __system_allocateHeaps(void) {
     svcGetResourceLimitLimitValues(&max_commit, reslimit, &type, 1);
     svcGetResourceLimitCurrentValues(&cur_commit, reslimit, &type, 1);
     svcCloseHandle(reslimit);
+    /* Azahar gives a 3dsx a 96 MB region even in O3DS mode; a retail O3DS gives 64 MB.
+     * Use the retail size on O3DS (128 MB total) so emulator runs hit the real limit. */
+    if (osGetMemRegionSize(MEMREGION_ALL) <= 128u * 1024 * 1024 && max_commit > 64ll * 1024 * 1024)
+        max_commit = 64ll * 1024 * 1024;
+    s_commit_max = max_commit;
+    s_commit_cur = cur_commit;
 
     u32 total = (u32)(max_commit - cur_commit) & ~0xFFFu;
+    total -= N3DS_SOC_SIZE; /* kept for the live-log network buffer (must not be linear) */
     u32 base = 0;
     if (total <= N3DS_GPU_LINEAR_SIZE ||
         R_FAILED(svcControlMemory(&base, 0, 0, total, MEMOP_ALLOC_LINEAR, MEMPERM_READ | MEMPERM_WRITE))) {
@@ -60,10 +81,154 @@ static const devoptab_t* console_dev;
 
 static int log_fd = -1; /* sdmc:/3ds/AnimalCrossing/log.txt, unbuffered */
 
+/* Bottom screen: status rows 0-3 (updated in place, n3ds_status) and a separator,
+ * then the live log in rows 5-29. The lock keeps threads from mixing the two. */
+#define STATUS_ROWS 4
+static PrintConsole s_con_log, s_con_status;
+static LightLock s_con_lock;
+
+/* Live log over Wi-Fi: when started from the netloader, the game runs a log server on
+ * TCP port 17492. 3ds/push_3ds.sh connects to it (PC -> 3DS, the same direction as the
+ * 3dslink upload and FTP, so a PC firewall or VPN does not block it). The last 64 KB of
+ * the log are kept and sent on connect, then each new line is sent live. */
+#define LIVE_LOG_PORT 17492
+static int s_netloaded; /* set in main: started by the Homebrew Launcher netloader */
+#define LOG_RING (64 * 1024)
+static char s_ring[LOG_RING];
+static u32 s_ring_pos;
+static int s_ring_full;
+static int s_listen = -1;
+static int s_client = -1;
+static char s_live_status[96];
+
+static void ring_add(const char* p, size_t n) {
+    while (n) {
+        size_t k = LOG_RING - s_ring_pos;
+        if (k > n) k = n;
+        memcpy(s_ring + s_ring_pos, p, k);
+        s_ring_pos = (s_ring_pos + k) % LOG_RING;
+        if (s_ring_pos == 0) s_ring_full = 1;
+        p += k;
+        n -= k;
+    }
+}
+
+static int send_all(int sock, const char* p, size_t n) {
+    while (n) {
+        int k = send(sock, p, n, 0);
+        if (k <= 0) return -1;
+        p += k;
+        n -= (size_t)k;
+    }
+    return 0;
+}
+
+/* Accepts one client at a time; on connect sends the kept log, then tee_write streams */
+static void log_server_thread(void* arg) {
+    (void)arg;
+    for (;;) {
+        if (s_client < 0) {
+            int c = accept(s_listen, NULL, NULL);
+            if (c >= 0) {
+                LightLock_Lock(&s_con_lock);
+                int bad = 0;
+                if (s_ring_full) bad |= send_all(c, s_ring + s_ring_pos, LOG_RING - s_ring_pos);
+                bad |= send_all(c, s_ring, s_ring_pos);
+                if (bad) close(c);
+                else s_client = c;
+                LightLock_Unlock(&s_con_lock);
+            }
+        }
+        svcSleepThread(100000000LL);
+    }
+}
+
+static void n3ds_init_live_log(int netloaded) {
+    static const u32 soc_size = N3DS_SOC_SIZE;
+    if (!netloaded) return;
+    u32 soc_addr = 0;
+    Result rc = svcControlMemory(&soc_addr, OS_HEAP_AREA_BEGIN, 0, soc_size, MEMOP_ALLOC, MEMPERM_READ | MEMPERM_WRITE);
+    u32* soc_buf = R_SUCCEEDED(rc) ? (u32*)soc_addr : NULL;
+    if (soc_buf) rc = socInit(soc_buf, soc_size);
+    if (R_FAILED(rc)) {
+        snprintf(s_live_status, sizeof(s_live_status), "live log: off, socInit failed (0x%08lX)", (unsigned long)rc);
+        if (soc_buf) svcControlMemory(&soc_addr, soc_addr, 0, soc_size, MEMOP_FREE, 0);
+        return;
+    }
+    s_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(LIVE_LOG_PORT);
+    a.sin_addr.s_addr = INADDR_ANY;
+    if (s_listen < 0 || bind(s_listen, (struct sockaddr*)&a, sizeof(a)) < 0 || listen(s_listen, 1) < 0) {
+        snprintf(s_live_status, sizeof(s_live_status), "live log: off, socket setup failed (errno %d)", errno);
+        return;
+    }
+    fcntl(s_listen, F_SETFL, fcntl(s_listen, F_GETFL, 0) | O_NONBLOCK);
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (!threadCreate(log_server_thread, NULL, 16 * 1024, prio - 1, 1, true) &&
+        !threadCreate(log_server_thread, NULL, 16 * 1024, prio - 1, -2, true)) {
+        snprintf(s_live_status, sizeof(s_live_status), "live log: off, thread create failed");
+        return;
+    }
+    struct in_addr ip = { (u32)gethostid() };
+    snprintf(s_live_status, sizeof(s_live_status), "live log: listening on %s:%d", inet_ntoa(ip), LIVE_LOG_PORT);
+}
+
 static ssize_t tee_write(struct _reent* r, void* fd, const char* ptr, size_t len) {
     svcOutputDebugString(ptr, (s32)len);
     if (log_fd >= 0) write(log_fd, ptr, len);
-    return console_dev->write_r(r, fd, ptr, len);
+    LightLock_Lock(&s_con_lock);
+    ring_add(ptr, len);
+    if (s_client >= 0 && send_all(s_client, ptr, len) < 0) { /* PC client went away */
+        close(s_client);
+        s_client = -1;
+    }
+    consoleSelect(&s_con_log);
+    ssize_t n = console_dev->write_r(r, fd, ptr, len);
+    LightLock_Unlock(&s_con_lock);
+    return n;
+}
+
+/* Log line without the console lock (watchdog: works even if a thread holds the lock) */
+void n3ds_log_raw(const char* s) {
+    size_t len = strlen(s);
+    svcOutputDebugString(s, (s32)len);
+    if (log_fd >= 0) { write(log_fd, s, len); fsync(log_fd); }
+    if (s_client >= 0) send(s_client, s, len, 0);
+}
+
+/* Overwrites status row 0..STATUS_ROWS-1 on the bottom screen (not logged) */
+void n3ds_status(int row, const char* fmt, ...) {
+    char buf[48];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0 || row < 0 || row >= STATUS_ROWS || !console_dev) return;
+    if (n > 38) n = 38; /* 40 columns from column 1; a full row would wrap */
+    memset(buf + n, ' ', 38 - n);
+    LightLock_Lock(&s_con_lock);
+    consoleSelect(&s_con_status);
+    s_con_status.cursorX = 1; /* libctru cursor columns start at 1 here: 0 cut the first character */
+    s_con_status.cursorY = row;
+    console_dev->write_r(_REENT, 0, buf, 38);
+    consoleSelect(&s_con_log);
+    LightLock_Unlock(&s_con_lock);
+}
+
+static void n3ds_init_consoles(void) {
+    LightLock_Init(&s_con_lock);
+    consoleInit(GFX_BOTTOM, &s_con_log);
+    s_con_status = s_con_log;
+    consoleSetWindow(&s_con_status, 0, 0, 40, STATUS_ROWS + 1);
+    consoleSetWindow(&s_con_log, 0, STATUS_ROWS + 1, 40, 30 - STATUS_ROWS - 1);
+    consoleSelect(&s_con_status);
+    s_con_status.cursorY = STATUS_ROWS;
+    printf("---------------------------------------"); /* 39: a 40th column would scroll the window */
+    consoleSelect(&s_con_log);
 }
 
 static devoptab_t tee_dev = { .name = "tee", .write_r = tee_write };
@@ -141,11 +306,31 @@ void n3ds_platform_init(void) {
     }
 
     gfxInitDefault();
-    consoleInit(GFX_BOTTOM, NULL);
+    /* Both top framebuffers still hold the Homebrew Launcher image until the first frame */
+    for (int i = 0; i < 2; i++) {
+        u16 w, h;
+        u8* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &w, &h);
+        memset(fb, 0, (size_t)w * h * 3);
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+    }
+    n3ds_init_consoles();
+    {   /* debug switch "livelog" in debug3ds.txt forces the log server on (Azahar tests) */
+        char sw[256] = { 0 };
+        FILE* f = fopen("debug3ds.txt", "r");
+        if (f) { fread(sw, 1, sizeof(sw) - 1, f); fclose(f); }
+        if (strstr(sw, "livelog")) s_netloaded = 1;
+    }
+    n3ds_init_live_log(s_netloaded);
     n3ds_install_log_tee();
+    if (s_live_status[0]) printf("%s\n", s_live_status);
     printf("Animal Crossing 3DS (%s)\n", is_new ? "N3DS" : "O3DS");
     printf("heap %08lx +%luKB\n", __ctru_heap, __ctru_heap_size >> 10);
+    printf("commit max %lluKB, used at start %lluKB, app region %luKB\n", s_commit_max >> 10, s_commit_cur >> 10,
+           (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) >> 10));
 }
+
+char g_n3ds_args[256]; /* command-line arguments joined by spaces */
 
 /* pc_main.c's main() is renamed via -Dmain=pc_main_entry */
 extern int pc_main_entry(int argc, char* argv[]);
@@ -166,8 +351,14 @@ static void game_thread(void* arg) {
 int main(int argc, char* argv[]) {
     /* hbmenu passes only the path; turn on the PC layer's diagnostic output */
     static char* default_argv[] = { "ac_3ds", "--verbose", NULL };
+    s_netloaded = __3dslink_host.s_addr != 0 || (argc > 0 && argv[0] && strncmp(argv[0], "3dslink:", 8) == 0);
     g_argc = argc > 1 ? argc : 2;
     g_argv = argc > 1 ? argv : default_argv;
+    /* 3dslink arguments also carry render debug switches (n3ds_tev.c), e.g. "-- --verbose shots" */
+    for (int i = 1; i < argc; i++) {
+        strncat(g_n3ds_args, argv[i], sizeof(g_n3ds_args) - strlen(g_n3ds_args) - 2);
+        strcat(g_n3ds_args, " ");
+    }
 
     mkdir("sdmc:/3ds", 0777);
     mkdir(N3DS_DATA_DIR, 0777);
@@ -199,4 +390,10 @@ int main(int argc, char* argv[]) {
     }
     gfxExit();
     return g_ret;
+}
+
+/* Free newlib heap in bytes: never-claimed space plus free blocks */
+u32 n3ds_heap_free(void) {
+    struct mallinfo mi = mallinfo();
+    return (u32)(__ctru_heap_size - mi.arena + mi.fordblks);
 }

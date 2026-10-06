@@ -1,0 +1,14 @@
+; test_min.v.pica - GPU self-test A: pass-through position and color, 2 inputs.
+.constf consts(1.0, 0.00392156862745, 0.0, 0.0)
+.alias ones consts.xxxx
+.alias inv255 consts.yyyy
+
+.out outpos position
+.out outclr color
+
+.proc main
+	mov outpos.xyz, v0
+	mov outpos.w, ones
+	mul outclr, inv255, v1
+	end
+.end

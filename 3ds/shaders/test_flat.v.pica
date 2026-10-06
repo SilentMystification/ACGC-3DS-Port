@@ -1,0 +1,25 @@
+; test_flat.v.pica - GPU self-test B: the game's 4-input vertex layout, no branch, no loop.
+; Outputs match gx.v.pica (position, color, texcoord0-2).
+.constf consts(1.0, 0.00392156862745, 0.0, 0.0)
+.alias ones consts.xxxx
+.alias inv255 consts.yyyy
+.alias zeros consts.zzzz
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.proc main
+	mov outpos.xyz, v0
+	mov outpos.w, ones
+	mul r0, inv255, v2
+	add r1, zeros, v1      ; read the normal input
+	dp3 r1.x, r1, r1
+	mul outclr, ones, r0
+	mov outtc0, v3
+	mov outtc1, v3
+	mov outtc2, v3
+	end
+.end

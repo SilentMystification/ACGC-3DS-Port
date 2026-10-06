@@ -44,7 +44,11 @@ extern "C" {
 /* DIRTY() is defined below g_gx - it also bumps per-group sequence counters */
 
 /* --- Vertex buffer --- */
+#ifdef TARGET_3DS
+#define PC_GX_MAX_VERTS       8192  /* 96-byte vertices: 768 KB, not 6 MB (O3DS has 64 MB) */
+#else
 #define PC_GX_MAX_VERTS       65536
+#endif
 #define PC_GX_MAX_ATTRIB_SIZE 64
 #define PC_GX_MAX_ATTR        26
 #define PC_GX_MAX_VTXFMT      8

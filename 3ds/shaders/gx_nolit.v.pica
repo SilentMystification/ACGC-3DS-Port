@@ -1,4 +1,5 @@
-; gx.v.pica - GX vertex stage for the 3DS port (see 3ds/src/n3ds_tev.c).
+; gx_nolit.v.pica - GPU self-test C: gx.v.pica without the ifu/for lighting block.
+; Generated from gx.v.pica. GX vertex stage for the 3DS port (see 3ds/src/n3ds_tev.c).
 ; Position transform, GX channel-0 lighting per vertex, and two texgens
 ; routed to the three PICA texture units. Fog is done by the PICA fog unit.
 
@@ -55,21 +56,7 @@
 	mul r4, inv255, inclr
 
 	; r6 = light sum
-	ifu lit
-		mov r6, ambReg
-		add r7, r4, -r6
-		mul r7, ambSel, r7
-		add r6, r6, r7
-		for lightLoop
-			dp3 r7.x, lightDir[aL], r2
-			max r7.x, zeros, r7.x
-			mul r8, lightCol[aL], r7.xxxx
-			add r6, r6, r8
-		.end
-		min r6, ones, r6
-	.else
-		mov r6, unlitAcc
-	.end
+	mov r6, unlitAcc ; self-test C: lighting block removed
 
 	; color = material * light sum
 	mov r5, matReg

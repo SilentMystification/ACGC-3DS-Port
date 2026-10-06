@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* --- XXHash64 (seed=0, matches Dolphin's GetHash64) --- */
 
@@ -604,7 +605,11 @@ static int gc_texture_data_size(int w, int h, unsigned int fmt) {
 }
 
 /* --- Loaded texture cache (GL ID, avoids re-reading DDS from disk) --- */
+#ifdef TARGET_3DS
+#define LOADED_CACHE_SIZE 1024  /* 24 KB, not 768 KB: HD packs do not fit in 3DS memory */
+#else
 #define LOADED_CACHE_SIZE 32768
+#endif
 #define LOADED_CACHE_MASK (LOADED_CACHE_SIZE - 1)
 
 typedef struct {
@@ -702,6 +707,14 @@ void pc_texture_pack_init(void) {
     xxhash64_selftest();
 
     check_compressed_texture_support();
+
+    {   /* No pack folder: skip the lookup tables (~14 MB) */
+        struct stat st;
+        if (stat("texture_pack", &st) != 0) {
+            printf("[TexturePack] No texture pack found in texture_pack/\n");
+            return;
+        }
+    }
 
     g_texpack_map = (TexPackEntry*)calloc(TEXPACK_MAP_SIZE, sizeof(TexPackEntry));
     g_texpack_wc_map = (TexPackWildcardEntry*)calloc(TEXPACK_WC_SIZE, sizeof(TexPackWildcardEntry));

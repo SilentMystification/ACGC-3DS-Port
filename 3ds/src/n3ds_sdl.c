@@ -169,8 +169,8 @@ SDL_Window* SDL_CreateWindow(const char* t, int x, int y, int w, int h, Uint32 f
     return (SDL_Window*)&dummy_window;
 }
 void SDL_DestroyWindow(SDL_Window* w) { (void)w; }
-/* pc_vi.c puts the FPS in the window title every 60 frames: use it as a log heartbeat */
-void SDL_SetWindowTitle(SDL_Window* w, const char* t) { (void)w; printf("[title] %s\n", t); }
+/* pc_vi.c puts the FPS in the window title every 60 frames; the bottom-screen status shows it instead */
+void SDL_SetWindowTitle(SDL_Window* w, const char* t) { (void)w; (void)t; }
 void SDL_SetWindowSize(SDL_Window* w, int a, int b) { (void)w; (void)a; (void)b; }
 void SDL_SetWindowPosition(SDL_Window* w, int a, int b) { (void)w; (void)a; (void)b; }
 void SDL_SetWindowBordered(SDL_Window* w, SDL_bool b) { (void)w; (void)b; }

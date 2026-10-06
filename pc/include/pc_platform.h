@@ -33,7 +33,7 @@
 #ifdef TARGET_3DS
 /* The game sizes its heaps from this arena. On GC the DOL and REL share the 24 MB,
  * so the game works with far less; the 3DS needs the room for the 16 MB ARAM buffer. */
-#define PC_MAIN_MEMORY_SIZE   (12 * 1024 * 1024)
+#define PC_MAIN_MEMORY_SIZE   (8 * 1024 * 1024)
 #else
 #define PC_MAIN_MEMORY_SIZE   (24 * 1024 * 1024)
 #endif

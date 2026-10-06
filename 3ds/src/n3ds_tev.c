@@ -28,22 +28,30 @@ static struct {
 
 static C3D_FogLut s_fog_lut;
 
+/* Current combiner and shader state; n3ds_gl.c copies it into each draw record so a GPU
+ * hang report names the state of every draw in the frame. Texture fmt 0xFF = none. */
+struct N3DSTevState { u8 pica, fog, lit, alpha; u8 fmt[3]; u16 w[3], h[3]; } g_n3ds_tev_state;
+
 C3D_Tex* n3ds_gl_tex(GLuint name); /* n3ds_gl.c: NULL if no usable texture */
 
 /* Render debug switches: words in sdmc:/3ds/AnimalCrossing/debug3ds.txt
- * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex shots */
-enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32, DBG_SHOTS = 64 };
+ * (run_azahar.ps1 -Debug "..."): nofog nolight notex texonly logtev dumptex shots noscissor gputest */
+enum { DBG_NOFOG = 1, DBG_NOLIGHT = 2, DBG_NOTEX = 4, DBG_TEXONLY = 8, DBG_LOGTEV = 16, DBG_DUMPTEX = 32, DBG_SHOTS = 64, DBG_NOSCISSOR = 128, DBG_GPUTEST = 256 };
 int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots" };
-    char buf[256] = { 0 };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest" };
+    extern char g_n3ds_args[]; /* n3ds_sys.c: 3dslink arguments */
+    char buf[512] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
-    if (!f) return;
-    fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    for (int i = 0; i < 7; i++)
+    if (f) {
+        fread(buf, 1, 255, f);
+        fclose(f);
+    }
+    strncat(buf, g_n3ds_args, 255);
+    if (!buf[0]) return;
+    for (int i = 0; i < 9; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }
@@ -462,14 +470,23 @@ static void n3ds_tev_build(void) {
     if (s_dbg & DBG_LOGTEV) log_tev(ns, pica);
     for (int i = pica; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
     C3D_TexEnvBufUpdate(C3D_Both, buf_mask);
+    g_n3ds_tev_state.pica = (u8)pica;
 }
 
 /* --- textures, alpha test --- */
 
 
 
+/* C3D_TexBind(unit > 0, NULL) reads the NULL texture's type (a data abort on hardware;
+ * Azahar returns 0). Units 1 and 2 get this 8x8 white texture instead. */
+static C3D_Tex s_white;
+
 static void n3ds_bind_textures(void) {
     int ns = g_gx.num_tev_stages;
+    if (!s_white.data && C3D_TexInit(&s_white, 8, 8, GPU_L8)) {
+        memset(s_white.data, 0xFF, 64);
+        C3D_TexFlush(&s_white);
+    }
     for (int s = 0; s < 3; s++) {
         C3D_Tex* tex = NULL;
         float sel0 = 1.0f, sel1 = 0.0f;
@@ -481,7 +498,10 @@ static void n3ds_bind_textures(void) {
                 sel1 = 1.0f;
             }
         }
-        C3D_TexBind(s, tex);
+        C3D_TexBind(s, tex || s == 0 ? tex : &s_white);
+        g_n3ds_tev_state.fmt[s] = tex ? (u8)tex->fmt : 0xFF;
+        g_n3ds_tev_state.w[s] = tex ? tex->width : 0;
+        g_n3ds_tev_state.h[s] = tex ? tex->height : 0;
         C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unitsel + s, sel0, sel1, 0.0f, 0.0f);
     }
 }
@@ -497,6 +517,7 @@ static void n3ds_alpha_test(void) {
     static int warned;
     int c0 = g_gx.alpha_comp0, c1 = g_gx.alpha_comp1, op = g_gx.alpha_op;
     int r0 = g_gx.alpha_ref0, r1 = g_gx.alpha_ref1;
+    g_n3ds_tev_state.alpha = !((c0 == 7 && c1 == 7) || (op == 1 && (c0 == 7 || c1 == 7)));
     if (c0 == 7 && c1 == 7) { C3D_AlphaTest(false, GPU_ALWAYS, 0); return; }
     if (op == 1 && (c0 == 7 || c1 == 7)) { C3D_AlphaTest(false, GPU_ALWAYS, 0); return; } /* OR ALWAYS */
     if (op == 0 && c0 == 7) { C3D_AlphaTest(true, gx_compare(c1), r1); return; }
@@ -517,7 +538,15 @@ static void n3ds_projection(void) {
     /* 3DS screens are rotated: clip x' = y, y' = -x (as citro3d's Mtx_*Tilt) */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.proj + 0, p[1][0], p[1][1], p[1][2], p[1][3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.proj + 1, -p[0][0], -p[0][1], -p[0][2], -p[0][3]);
-    set_rows(s_u.proj + 2, &p[2][0], 2, 4);
+    /* Ortho: GL-style z [-1,1] -> PICA [-1,0]. emu64 draws 2D (speech text) with z outside the
+     * GX range; GL clips at [-w,w] so the PC build draws it, the PICA clips at [-w,0]. Order is kept. */
+    if (g_gx.projection_type == 1) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.proj + 2, 0.5f * p[2][0], 0.5f * p[2][1], 0.5f * p[2][2],
+                      0.5f * p[2][3] - 0.5f);
+        set_rows(s_u.proj + 3, &p[3][0], 1, 4);
+    } else {
+        set_rows(s_u.proj + 2, &p[2][0], 2, 4);
+    }
 }
 
 /* GX tex matrix id -> slot: raw 0..9, GX_TEXMTX0(30)..(57) stride 3, GX_IDENTITY(60) = none */
@@ -560,6 +589,7 @@ static void n3ds_lighting(void) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.ambSel, as, as, as, 0.0f);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unlitAcc, 1.0f, 1.0f, 1.0f, k);
     C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_u.lit, lit);
+    g_n3ds_tev_state.lit = (u8)lit;
     if (!lit) return;
 
     int n = 0;
@@ -583,7 +613,8 @@ static void n3ds_lighting(void) {
 /* Linear GX fog on eye distance, through the PICA fog LUT (indexed by depth).
  * ponytail: assumes viewport depth range 0..1 (depth = z_ndc + 1); pass the range in if AC uses another. */
 static void n3ds_fog(void) {
-    if (g_gx.fog_type == 0 || (s_dbg & DBG_NOFOG)) {
+    g_n3ds_tev_state.fog = !(g_gx.fog_type == 0 || (s_dbg & DBG_NOFOG));
+    if (!g_n3ds_tev_state.fog) {
         C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         return;
     }
@@ -625,6 +656,61 @@ void n3ds_gx_upload(unsigned int dirty) {
     if (dirty & PC_GX_DIRTY_ALPHA_CMP) n3ds_alpha_test();
 }
 
+/* The game shader and its vertex layout (n3ds_gl.c N3DSVtx); the self-test binds others */
+void n3ds_tev_bind_main(void) {
+    C3D_BindProgram(&s_prog);
+    C3D_AttrInfo* ai = C3D_GetAttrInfo();
+    AttrInfo_Init(ai);
+    AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);         /* position */
+    AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);         /* normal */
+    AttrInfo_AddLoader(ai, 2, GPU_UNSIGNED_BYTE, 4); /* color0 */
+    AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);         /* texcoord0 */
+}
+
+/* GPU self-test (n3ds_gl.c): identity transforms (vertex position = clip position),
+ * vertex color as material, texgen 0 to every unit, and nlights white lights (0 = unlit). */
+void n3ds_tev_test_uniforms(int nlights) {
+    static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    set_rows(s_u.proj, id, 4, 4);
+    set_rows(s_u.mv, id, 3, 4);
+    set_rows(s_u.nrm, id, 3, 4);
+    set_rows(s_u.texmtx0, id, 2, 4);
+    set_rows(s_u.texmtx1, id, 2, 4);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.tgsrc, 0, 0, 0, 0);
+    for (int u = 0; u < 3; u++) C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unitsel + u, 1, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.matReg, 1, 1, 1, 1);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.matSel, 1, 1, 1, 1);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.ambReg, 0.2f, 0.2f, 0.2f, 1);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.ambSel, 0, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unlitAcc, 1, 1, 1, 1);
+    for (int i = 0; i < 8; i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.lightDir + i, 0, 0, 1, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.lightCol + i, 1, 1, 1, 0);
+    }
+    C3D_IVUnifSet(GPU_VERTEX_SHADER, s_u.lightLoop, nlights > 0 ? nlights - 1 : 0, 0, 1, 0);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_u.lit, nlights > 0);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+}
+
+/* Fog with a ramp LUT (self-test only) */
+void n3ds_tev_test_fog(int on) {
+    if (!on) {
+        C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+        return;
+    }
+    float data[256];
+    for (int i = 0; i <= 128; i++) {
+        float v = 1.0f - i / 128.0f;
+        if (i < 128) data[i] = v;
+        if (i > 0) data[i + 127] = v - data[i - 1];
+    }
+    FogLut_FromArray(&s_fog_lut, data);
+    C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_FogColor(0x808080);
+    C3D_FogLutBind(&s_fog_lut);
+}
+
 /* --- pc_gx_tev.c interface --- */
 
 void pc_gx_tev_init(void) {
@@ -641,17 +727,18 @@ void pc_gx_tev_init(void) {
     LOC(lightDir); LOC(lightCol); LOC(lightLoop); LOC(lit);
 #undef LOC
 
-    C3D_AttrInfo* ai = C3D_GetAttrInfo();
-    AttrInfo_Init(ai);
-    AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);         /* position */
-    AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);         /* normal */
-    AttrInfo_AddLoader(ai, 2, GPU_UNSIGNED_BYTE, 4); /* color0 */
-    AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);         /* texcoord0 */
+    n3ds_tev_bind_main();
 
     memset(&s_variant, 0, sizeof(s_variant));
     s_variant.used = 1;
     s_variant.prog = N3DS_GX_PROG;
     memset(s_variant.uploaded_seq, 0xFF, sizeof(s_variant.uploaded_seq));
+
+    /* before pc_gx_init sets its GL state and marks all GX state dirty */
+    if (s_dbg & DBG_GPUTEST) {
+        extern void n3ds_gl_gputest(void);
+        n3ds_gl_gputest();
+    }
 }
 
 void pc_gx_tev_shutdown(void) {

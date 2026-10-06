@@ -12,6 +12,13 @@
 #include <citro3d.h>
 #include <sys/stat.h>
 #include "pc_gx_internal.h"
+#include "test_min_shbin.h"
+#include "test_flat_shbin.h"
+#include "gx_nolit_shbin.h"
+#include "test_out5_shbin.h"
+#include "test_in4_shbin.h"
+#include "test_out3_shbin.h"
+#include "test_out4_shbin.h"
 
 #define N3DS_GX_PROG 0x7FFF0001u
 #define N3DS_CMDBUF_SIZE (1024 * 1024)
@@ -49,7 +56,7 @@ static u16* s_quad_idx;
 static GLuint s_program;
 static N3DSTex* s_bound_tex;
 static N3DSTex* s_free_list; /* deleted during this frame; freed once the GPU is done */
-static u32 s_stat_draws, s_stat_verts, s_stat_frames;
+static u32 s_stat_draws, s_stat_verts;
 
 static struct {
     int depth_test, depth_mask, blend, cull, scissor;
@@ -119,20 +126,29 @@ static void apply_cull(void) {
                : gs.cull_face == GL_BACK ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
 }
 
+/* Real hardware can hang on states that Azahar accepts: empty viewports and scissor
+ * rectangles, and draws with no vertices. Such draws are skipped (they draw nothing anyway). */
+static int s_vp_empty, s_sc_empty;
+
 /* GL window rect (y up, 400x240) -> rotated target (x = screen y from bottom, y = screen x from right) */
 static void apply_viewport(void) {
+    s_vp_empty = gs.vp[2] <= 0 || gs.vp[3] <= 0;
+    if (s_vp_empty) return;
     C3D_SetViewport((u32)gs.vp[1], (u32)(SCREEN_W - gs.vp[0] - gs.vp[2]), (u32)gs.vp[3], (u32)gs.vp[2]);
 }
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 static void apply_scissor(void) {
-    if (!gs.scissor) {
+    extern int g_n3ds_dbg; /* 128 = noscissor */
+    s_sc_empty = 0;
+    if (!gs.scissor || (g_n3ds_dbg & 128)) {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
         return;
     }
     int x0 = clampi(gs.sc[1], 0, SCREEN_H), x1 = clampi(gs.sc[1] + gs.sc[3], 0, SCREEN_H);
     int y0 = clampi(SCREEN_W - gs.sc[0] - gs.sc[2], 0, SCREEN_W), y1 = clampi(SCREEN_W - gs.sc[0], 0, SCREEN_W);
+    if (x1 <= x0 || y1 <= y0) { s_sc_empty = 1; return; }
     C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)x0, (u32)y0, (u32)x1, (u32)y1);
 }
 
@@ -192,9 +208,85 @@ static void free_deleted_textures(void) {
     }
 }
 
+/* --- hang diagnostics ---
+ * Step marker: the last render step reached (the CPU watchdog thread reports it).
+ * Draw records: the state of each draw in a frame; on a GPU timeout the records of the
+ * frame the GPU could not finish are logged, so the report names the bad draw. */
+static volatile const char* s_step = "boot";
+static char s_step_buf[64];
+static volatile u32 s_frames_done;
+
+#define DRAW_RECS 48
+typedef struct {
+    u8 prim, scissor, blend, depth;
+    u16 count, first;
+    s16 vp[4], sc[4];
+    struct { u8 pica, fog, lit, alpha; u8 fmt[3]; u16 w[3], h[3]; } tev; /* = N3DSTevState */
+} DrawRec;
+extern struct N3DSTevState { u8 pica, fog, lit, alpha; u8 fmt[3]; u16 w[3], h[3]; } g_n3ds_tev_state;
+static DrawRec s_recs[2][DRAW_RECS]; /* [0] frame being built, [1] frame submitted last */
+static u32 s_nrecs[2];
+
+static void record_draw(int prim, int first, int count) {
+    u32 i = s_nrecs[0]++;
+    if (i >= DRAW_RECS) i = DRAW_RECS - 1; /* keep the newest in the last slot */
+    DrawRec* r = &s_recs[0][i];
+    r->prim = (u8)prim; r->first = (u16)first; r->count = (u16)count;
+    r->scissor = (u8)gs.scissor; r->blend = (u8)gs.blend;
+    r->depth = (u8)(gs.depth_test | (gs.depth_mask << 1));
+    for (int k = 0; k < 4; k++) { r->vp[k] = (s16)gs.vp[k]; r->sc[k] = (s16)gs.sc[k]; }
+    memcpy(&r->tev, &g_n3ds_tev_state, sizeof(r->tev));
+}
+
+static void report_gpu_hang(u32 frame) {
+    printf("[HANG] GPU did not finish frame %lu within 2 s. Its %lu draws (last %d kept; "
+           "prim 0 tris 1 strip 2 fan 4 quads; tex f = GPU_TEXCOLOR, 255 none; depth bit0 test bit1 write):\n",
+           (unsigned long)frame, (unsigned long)s_nrecs[1], DRAW_RECS);
+    u32 n = s_nrecs[1] < DRAW_RECS ? s_nrecs[1] : DRAW_RECS;
+    for (u32 i = 0; i < n; i++) {
+        const DrawRec* r = &s_recs[1][i];
+        printf("[HANG] #%lu prim %d first %u n %u vp %d,%d %dx%d sc%s %d,%d %dx%d blend %d depth %d | "
+               "pica %u fog %u lit %u atest %u | tex0 f%u %ux%u tex1 f%u %ux%u tex2 f%u %ux%u\n",
+               (unsigned long)i, r->prim, r->first, r->count, r->vp[0], r->vp[1], r->vp[2], r->vp[3],
+               r->scissor ? "on" : "off", r->sc[0], r->sc[1], r->sc[2], r->sc[3], r->blend, r->depth,
+               r->tev.pica, r->tev.fog, r->tev.lit, r->tev.alpha, r->tev.fmt[0], r->tev.w[0], r->tev.h[0],
+               r->tev.fmt[1], r->tev.w[1], r->tev.h[1], r->tev.fmt[2], r->tev.w[2], r->tev.h[2]);
+    }
+}
+
+/* CPU watchdog: own thread; if no frame finishes for 3 s, log the frame and last step */
+static void watchdog_thread(void* arg) {
+    extern void n3ds_log_raw(const char* s);
+    (void)arg;
+    u32 last = 0, still = 0, reported = 0;
+    for (;;) {
+        svcSleepThread(1000000000LL);
+        u32 now = s_frames_done;
+        if (now != last) { last = now; still = 0; reported = 0; continue; }
+        if (++still >= 3 && !reported) {
+            char msg[160];
+            snprintf(msg, sizeof(msg), "[WATCHDOG] no frame finished for 3 s: %lu frames done, last render step: %s\n",
+                     (unsigned long)now, (const char*)s_step);
+            n3ds_log_raw(msg);
+            reported = 1;
+        }
+    }
+}
+
 static void ensure_frame(void) {
     if (s_in_frame) return;
-    C3D_FrameBegin(0); /* waits for the previous frame's GPU work */
+    s_step = "wait for GPU (FrameBegin)";
+    u64 t0 = osGetTime();
+    int reported = 0;
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) { /* the GPU still runs the previous frame */
+        if (!reported && osGetTime() - t0 > 2000) {
+            report_gpu_hang(s_frames_done);
+            reported = 1;
+        }
+        svcSleepThread(200000);
+    }
+    s_step = "frame setup";
+    s_nrecs[0] = 0;
     C3D_FrameDrawOn(s_target);
     s_in_frame = 1;
     s_arena_used = 0;
@@ -237,6 +329,7 @@ static void sync_midframe(void) {
  * every frame, render that pass to a texture target instead (the target is rotated, so a
  * GPU-only copy would need rotated texcoords). */
 static int readback(void) {
+    s_step = "color buffer readback";
     if (!s_readback) s_readback = (u32*)linearAlloc(SCREEN_W * SCREEN_H * 4);
     if (!s_readback) return 0;
     ensure_frame();
@@ -282,21 +375,83 @@ static void save_shot(u32 frame) {
     fclose(f);
 }
 
+/* --- performance: bottom-screen status every 30 frames, [PERF] log line every 600 --- */
+
+float g_n3ds_audio_fps, g_n3ds_audio_mix_ms; /* set by pc_audio.c */
+
+static void perf_frame(void) {
+    extern void n3ds_status(int row, const char* fmt, ...);
+    extern u32 n3ds_heap_free(void);
+    static u64 last;
+    static u32 n, stutters, sum_stutters, sum_frames, sum_draws, sum_verts;
+    static float worst, sum_worst;
+    static u64 sum_ticks, win_ticks;
+    u64 now = svcGetSystemTick();
+    if (last) {
+        u64 dt = now - last;
+        float ms = (float)dt / (float)CPU_TICKS_PER_MSEC;
+        win_ticks += dt;
+        if (ms > worst) worst = ms;
+        if (ms > 20.0f) stutters++;
+    }
+    last = now;
+    if (++n < 30) return;
+
+    float secs = (float)win_ticks / (float)SYSCLOCK_ARM11;
+    float fps = secs > 0.0f ? n / secs : 0.0f;
+    u32 heap = n3ds_heap_free() >> 10, lin = (u32)(linearSpaceFree() >> 10);
+    static int status_traced;
+    if (!status_traced) printf("[TRACE] first status update\n");
+    n3ds_status(0, "FPS %4.1f  avg %4.1fms  worst %4.1fms", fps, secs * 1000.0f / n, worst);
+    n3ds_status(1, "stutter(>20ms) %lu/30  draws %lu  vtx %lu", (unsigned long)stutters,
+                (unsigned long)(s_stat_draws / n), (unsigned long)(s_stat_verts / n));
+    n3ds_status(2, "heap %luK  linear %luK  EFB %lu", (unsigned long)heap, (unsigned long)lin,
+                (unsigned long)s_stat_copies);
+    n3ds_status(3, "audio %4.1f/s  mix %4.2fms", g_n3ds_audio_fps, g_n3ds_audio_mix_ms);
+    if (!status_traced++) printf("[TRACE] first status update done\n");
+
+    sum_frames += n; sum_ticks += win_ticks; sum_stutters += stutters;
+    sum_draws += s_stat_draws; sum_verts += s_stat_verts;
+    if (worst > sum_worst) sum_worst = worst;
+    /* first lines early (frames 60 and 180), so a hang in the first seconds still leaves numbers */
+    static u32 total_frames;
+    total_frames += n;
+    if (total_frames == 60 || total_frames == 180)
+        printf("[PERF] frame %lu: %.1f fps, worst %.1fms, %lu draws %lu vtx, GPU draw %.1fms proc %.1fms, heap %luK linear %luK\n",
+               (unsigned long)total_frames, fps, worst, (unsigned long)(s_stat_draws / n),
+               (unsigned long)(s_stat_verts / n), C3D_GetDrawingTime(), C3D_GetProcessingTime(),
+               (unsigned long)heap, (unsigned long)lin);
+    if (sum_frames >= 600) {
+        float s = (float)sum_ticks / (float)SYSCLOCK_ARM11;
+        printf("[PERF] %.0fs: %.1f fps, worst %.1fms, %lu stutters, %lu draws %lu vtx/frame, heap %luK linear %luK free, audio mix %.2fms\n",
+               s, sum_frames / s, sum_worst, (unsigned long)sum_stutters, (unsigned long)(sum_draws / sum_frames),
+               (unsigned long)(sum_verts / sum_frames), (unsigned long)heap, (unsigned long)lin, g_n3ds_audio_mix_ms);
+        sum_frames = sum_stutters = sum_draws = sum_verts = 0;
+        sum_ticks = 0;
+        sum_worst = 0.0f;
+    }
+    n = stutters = 0;
+    worst = 0.0f;
+    win_ticks = 0;
+    s_stat_draws = s_stat_verts = s_stat_copies = 0;
+}
+
 /* SDL_GL_SwapWindow */
 void n3ds_gl_swap(void) {
     extern int g_n3ds_dbg; /* n3ds_tev.c debug switches; 64 = shots */
     static u32 frame;
-    if ((g_n3ds_dbg & 64) && ++frame % 300 == 0) save_shot(frame);
+    ++frame; /* shots: frames 60, 120, 180 (boot), then every 300 */
+    if ((g_n3ds_dbg & 64) && (frame == 60 || frame == 120 || frame == 180 || frame % 300 == 0)) save_shot(frame);
     ensure_frame();
     if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
+    s_step = "FrameEnd (submit)";
     C3D_FrameEnd(0);
+    memcpy(s_recs[1], s_recs[0], sizeof(s_recs[0]));
+    s_nrecs[1] = s_nrecs[0];
+    s_frames_done++;
+    s_step = "game code (after FrameEnd)";
     s_in_frame = 0;
-    if (g_pc_verbose && ++s_stat_frames == 60) {
-        printf("[3DS/GL] %lu draws, %lu verts per frame, %lu EFB copies/s, linear free %luKB\n",
-               (unsigned long)(s_stat_draws / 60), (unsigned long)(s_stat_verts / 60),
-               (unsigned long)s_stat_copies, (unsigned long)(linearSpaceFree() >> 10));
-        s_stat_frames = s_stat_draws = s_stat_verts = s_stat_copies = 0;
-    }
+    perf_frame();
 }
 
 /* --- buffers and draws --- */
@@ -318,6 +473,7 @@ static void gl_buffer_data(GLenum target, GLsizeiptr size, const void* data, GLe
     ensure_frame();
     u32 count = (u32)size / sizeof(PCGXVertex);
     s_draw_vtx = NULL;
+    s_arena_used = (s_arena_used + 3) & ~3u; /* 4 x 36 = 144: each batch starts 16-byte aligned */
     if ((s_arena_used + count) * sizeof(N3DSVtx) > N3DS_VTX_ARENA) {
         if (!warned) { warned = 1; printf("[3DS/GL] vertex arena full, draws dropped\n"); }
         return;
@@ -336,7 +492,7 @@ static void gl_buffer_data(GLenum target, GLsizeiptr size, const void* data, GLe
 }
 
 static int draw_ready(void) {
-    if (s_program != N3DS_GX_PROG || !s_draw_vtx) return 0;
+    if (s_program != N3DS_GX_PROG || !s_draw_vtx || s_vp_empty || s_sc_empty) return 0;
     if (gs.cull && gs.cull_face == GL_FRONT_AND_BACK) return 0;
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
@@ -356,13 +512,21 @@ static void gl_draw_arrays(GLenum mode, GLint first, GLsizei count) {
             if (!warned) { warned = 1; printf("[3DS/GL] line/point primitives skipped\n"); }
             return;
     }
-    if (draw_ready()) C3D_DrawArrays(prim, first, count);
+    if (count >= 3 && draw_ready()) {
+        s_step = "draw (DrawArrays)";
+        record_draw((int)prim >> 8, first, count);
+        C3D_DrawArrays(prim, first, count);
+    }
 }
 
 static void gl_draw_elements(GLenum mode, GLsizei count, GLenum type, const void* offset) {
     (void)type;
-    if (mode == GL_TRIANGLES && s_quad_idx && draw_ready())
+    if (mode == GL_TRIANGLES && count >= 3 && s_quad_idx && draw_ready())
+    {
+        s_step = "draw (DrawElements)";
+        record_draw(4, 0, count); /* 4 = indexed quads */
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, (const u8*)s_quad_idx + (uintptr_t)offset);
+    }
 }
 
 /* --- textures (GL name = N3DSTex pointer) --- */
@@ -438,6 +602,8 @@ static void gl_tex_image_2d(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     (void)target; (void)ifmt; (void)border; (void)fmt; (void)type;
     N3DSTex* t = s_bound_tex;
     if (!t || level != 0 || w <= 0 || h <= 0 || !data) return;
+    snprintf(s_step_buf, sizeof(s_step_buf), "texture upload %ldx%ld", (long)w, (long)h);
+    s_step = s_step_buf;
     const u8* px = (const u8*)data;
     int gray = 1, opaque = 1, binary = 1;
     for (int i = 0; i < w * h; i++) {
@@ -451,7 +617,7 @@ static void gl_tex_image_2d(GLenum target, GLint level, GLint ifmt, GLsizei w, G
 
     extern int g_n3ds_dbg; /* n3ds_tev.c debug switches; 32 = dumptex */
     static int ndump;
-    if ((g_n3ds_dbg & 32) && ndump < 300) { /* texdump/NNN_WxH_fmt.rgba: decoded RGBA8 input */
+    if ((g_n3ds_dbg & 32) && ndump < 1500) { /* texdump/NNN_WxH_fmt.rgba: decoded RGBA8 input */
         char path[64];
         if (ndump == 0) mkdir("texdump", 0777);
         snprintf(path, sizeof(path), "texdump/%03d_%ldx%ld_%d.rgba", ndump++, (long)w, (long)h, (int)tf);
@@ -500,6 +666,312 @@ static void gl_tex_image_2d(GLenum target, GLint level, GLint ifmt, GLsizei w, G
     apply_tex_params(t);
 }
 
+/* --- GPU self-test (switch "gputest") ---
+ * Runs before the game: one feature per frame. Each frame must finish on the GPU within
+ * 1 s, else the log says HANG and names the test (the GPU stays hung, so this stops). */
+
+extern void n3ds_tev_test_uniforms(int nlights);
+extern void n3ds_tev_test_fog(int on);
+
+static const char* s_test_name;
+
+static void test_wait(void) {
+    u64 t0 = osGetTime();
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        if (osGetTime() - t0 > 1000) {
+            printf("[GPUTEST] HANG: GPU did not finish test '%s' within 1 s\n", s_test_name);
+            for (;;) svcSleepThread(1000000000LL);
+        }
+        svcSleepThread(1000000);
+    }
+    if (s_test_name) printf("[GPUTEST] pass: %s\n", s_test_name);
+    C3D_FrameDrawOn(s_target);
+    s_in_frame = 1;
+    s_arena_used = 0;
+    C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, 0x204060FF, 0xFFFFFF);
+}
+
+static void test_submit(const char* name) {
+    s_test_name = name;
+    printf("[GPUTEST] start: %s\n", name);
+    if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
+    C3D_FrameEnd(0);
+    s_in_frame = 0;
+    test_wait();
+}
+
+/* n vertices of a centered shape at depth z, color rgba */
+static N3DSVtx* test_verts(int n, float z, u32 rgba) {
+    static const float pos[4][2] = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+    s_arena_used = (s_arena_used + 3) & ~3u;
+    N3DSVtx* v = s_arena + s_arena_used;
+    for (int i = 0; i < n; i++) {
+        v[i].pos[0] = pos[i & 3][0]; v[i].pos[1] = pos[i & 3][1]; v[i].pos[2] = z;
+        v[i].nrm[0] = 0; v[i].nrm[1] = 0; v[i].nrm[2] = 1;
+        v[i].clr[0] = (u8)(rgba >> 24); v[i].clr[1] = (u8)(rgba >> 16); v[i].clr[2] = (u8)(rgba >> 8); v[i].clr[3] = (u8)rgba;
+        v[i].tc[0] = pos[i & 3][0] + 0.5f; v[i].tc[1] = pos[i & 3][1] + 0.5f;
+    }
+    s_arena_used += (u32)n;
+    C3D_BufInfo* bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    BufInfo_Add(bi, v, sizeof(N3DSVtx), 4, 0x3210);
+    return v;
+}
+
+static void test_env(GPU_TEVSRC src) { /* stage 0 = src, stages 1-5 pass */
+    for (int i = 0; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
+    C3D_TexEnv* env = C3D_GetTexEnv(0);
+    C3D_TexEnvSrc(env, C3D_Both, src, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    C3D_TexEnvBufUpdate(C3D_Both, 0);
+}
+
+static GLuint test_texture(int w, int h, int kind) { /* 0 RGBA8, 1 RGB565, 2 RGBA5551, 3 LA8 */
+    static u8 px[64 * 64 * 4];
+    for (int i = 0; i < w * h; i++) {
+        u8 c = (u8)((i * 7) & 0xFF);
+        px[i * 4 + 0] = c;
+        px[i * 4 + 1] = kind == 3 ? c : (u8)(255 - c);
+        px[i * 4 + 2] = kind == 3 ? c : 128;
+        px[i * 4 + 3] = kind == 0 ? (u8)(i & 0xFF) : kind == 2 ? (i & 1 ? 255 : 0) : 255;
+    }
+    GLuint t;
+    gl_gen_textures(1, &t);
+    gl_bind_texture(GL_TEXTURE_2D, t);
+    gl_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    return t;
+}
+
+
+void n3ds_gl_gputest(void) {
+    printf("[GPUTEST] begin (O3DS GPU checks, one feature per frame)\n");
+    s_test_name = NULL;
+    test_wait();
+
+    n3ds_tev_test_uniforms(0);
+    apply_viewport();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_TexBind(0, NULL);
+    test_env(GPU_PRIMARY_COLOR);
+    test_submit("clear only");
+
+    /* A-C isolate the first draw: pipeline setup, vertex layout, shader code */
+    {
+        static DVLB_s* dvlb[7];
+        static shaderProgram_s prog[7]; /* min, flat, nolit, out5, in4, out3, out4 */
+        const u32* bins[7] = { (const u32*)test_min_shbin, (const u32*)test_flat_shbin, (const u32*)gx_nolit_shbin,
+                               (const u32*)test_out5_shbin, (const u32*)test_in4_shbin,
+                               (const u32*)test_out3_shbin, (const u32*)test_out4_shbin };
+        const u32 sizes[7] = { test_min_shbin_size, test_flat_shbin_size, gx_nolit_shbin_size,
+                               test_out5_shbin_size, test_in4_shbin_size, test_out3_shbin_size, test_out4_shbin_size };
+        for (int i = 0; i < 7; i++) {
+            dvlb[i] = DVLB_ParseFile((u32*)bins[i], sizes[i]);
+            shaderProgramInit(&prog[i]);
+            shaderProgramSetVsh(&prog[i], &dvlb[i]->DVLE[0]);
+        }
+
+        /* A: 2 inputs (float3 position, ubyte4 color), 16-byte stride, pass-through shader */
+        static const float tri[3][2] = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.0f, 0.5f } };
+        u8* buf = (u8*)linearAlloc(3 * 16);
+        for (int i = 0; i < 3; i++) {
+            float p[3] = { tri[i][0], tri[i][1], -0.5f };
+            memcpy(buf + i * 16, p, 12);
+            buf[i * 16 + 12] = 255; buf[i * 16 + 13] = 0; buf[i * 16 + 14] = 255; buf[i * 16 + 15] = 255;
+        }
+        GSPGPU_FlushDataCache(buf, 3 * 16);
+        C3D_BindProgram(&prog[0]);
+        C3D_AttrInfo* ai = C3D_GetAttrInfo();
+        AttrInfo_Init(ai);
+        AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);
+        AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+        C3D_BufInfo* bi = C3D_GetBufInfo();
+        BufInfo_Init(bi);
+        BufInfo_Add(bi, buf, 16, 2, 0x10);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("A: minimal shader, 2 attributes, 16-byte stride");
+
+        /* B3a-e: A's inputs and layout with texcoord outputs. B3 (5 outputs, no texture
+         * unit) hung on O3DS; these find which texcoord outputs and unit states hang. */
+        GLuint ut[3];
+        for (int k = 0; k < 3; k++) ut[k] = test_texture(32, 16, k);
+        bi = C3D_GetBufInfo();
+        BufInfo_Init(bi);
+        BufInfo_Add(bi, buf, 16, 2, 0x10);
+
+        C3D_BindProgram(&prog[5]);
+        C3D_TexBind(0, NULL);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B3a: texcoord0 output, no texture unit");
+
+        C3D_BindProgram(&prog[5]);
+        C3D_TexBind(0, n3ds_gl_tex(ut[0]));
+        bi = C3D_GetBufInfo(); BufInfo_Init(bi); BufInfo_Add(bi, buf, 16, 2, 0x10);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B3b: texcoord0 output, unit 0 enabled");
+
+        C3D_BindProgram(&prog[6]);
+        C3D_TexBind(0, NULL);
+        bi = C3D_GetBufInfo(); BufInfo_Init(bi); BufInfo_Add(bi, buf, 16, 2, 0x10);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B3c: texcoord0-1 outputs, no texture unit");
+
+        C3D_BindProgram(&prog[3]);
+        for (int k = 0; k < 3; k++) C3D_TexBind(k, n3ds_gl_tex(ut[k]));
+        bi = C3D_GetBufInfo(); BufInfo_Init(bi); BufInfo_Add(bi, buf, 16, 2, 0x10);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B3e: texcoord0-2 outputs, units 0-2 enabled");
+        linearFree(buf);
+
+        /* B1: the game's 36-byte layout read by the 2-input shader (padding skips normal, texcoord) */
+        C3D_BindProgram(&prog[0]);
+        ai = C3D_GetAttrInfo();
+        AttrInfo_Init(ai);
+        AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);
+        AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+        N3DSVtx* gv = test_verts(3, -0.5f, 0xFFFF00FF);
+        bi = C3D_GetBufInfo();
+        BufInfo_Init(bi);
+        BufInfo_Add(bi, gv, sizeof(N3DSVtx), 4, 0xD1E0); /* pos, 12 B pad, color, 8 B pad */
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B1: game 36-byte layout via padding, 2 inputs, 2 outputs");
+
+        /* B2: all 4 game attributes (float3, float3, ubyte4, float2), 2 outputs */
+        extern void n3ds_tev_bind_main(void);
+        n3ds_tev_bind_main();
+        C3D_BindProgram(&prog[4]);
+        test_verts(3, -0.5f, 0x00FF00FF);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B2: game 4-attribute layout, 4 inputs, 2 outputs");
+
+        /* B: the game's 4-attribute, 36-byte layout; shader without branch or loop, 5 outputs */
+        n3ds_tev_bind_main();
+        C3D_BindProgram(&prog[1]);
+        test_verts(3, -0.5f, 0x00FFFFFF);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("B: game vertex layout, flat shader");
+
+        /* C: the game shader without the ifu/for lighting block (same uniforms) */
+        C3D_BindProgram(&prog[2]);
+        n3ds_tev_test_uniforms(0);
+        test_verts(3, -0.5f, 0xFF8000FF);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit("C: game shader without lighting block");
+
+        n3ds_tev_bind_main(); /* D (next): the full game shader */
+        n3ds_tev_test_uniforms(0);
+    }
+
+    test_verts(3, -0.5f, 0xFF0000FF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("D: game shader, triangle, vertex color, no texture");
+
+    test_verts(4, -0.5f, 0x00FF00FF);
+    C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, s_quad_idx);
+    test_submit("indexed quad (DrawElements)");
+
+    test_verts(4, -0.5f, 0x0000FFFF);
+    C3D_DrawArrays(GPU_TRIANGLE_FAN, 0, 4);
+    test_verts(4, -0.5f, 0xFFFF00FF);
+    C3D_DrawArrays(GPU_TRIANGLE_STRIP, 0, 4);
+    test_submit("triangle fan and strip");
+
+    static const char* const fmt_names[4] = { "texture RGBA8", "texture RGB565", "texture RGBA5551", "texture LA8" };
+    GLuint tex[4];
+    for (int k = 0; k < 4; k++) {
+        tex[k] = test_texture(32, 16, k);
+        C3D_TexBind(0, n3ds_gl_tex(tex[k]));
+        test_env(GPU_TEXTURE0);
+        test_verts(3, -0.5f, 0xFFFFFFFF);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+        test_submit(fmt_names[k]);
+    }
+
+    C3D_TexBind(1, n3ds_gl_tex(tex[1]));
+    C3D_TexBind(2, n3ds_gl_tex(tex[2]));
+    for (int i = 0; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
+    C3D_TexEnv* e = C3D_GetTexEnv(0);
+    C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE0, GPU_TEXTURE1, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(e, C3D_Both, GPU_MODULATE);
+    e = C3D_GetTexEnv(1);
+    C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_TEXTURE2, GPU_CONSTANT);
+    C3D_TexEnvFunc(e, C3D_Both, GPU_INTERPOLATE);
+    C3D_TexEnvColor(e, 0x80FF8040);
+    e = C3D_GetTexEnv(2);
+    C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PREVIOUS_BUFFER);
+    C3D_TexEnvFunc(e, C3D_Both, GPU_MULTIPLY_ADD);
+    C3D_TexEnvColor(e, 0xFF404040);
+    C3D_TexEnvBufUpdate(C3D_Both, 1);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("3 textures, 3 combiner stages, constants, combiner buffer");
+
+    C3D_TexBind(1, n3ds_gl_tex(tex[3]));
+    C3D_TexBind(2, n3ds_gl_tex(tex[3]));
+    C3D_TexBind(0, n3ds_gl_tex(tex[0]));
+    test_env(GPU_TEXTURE0);
+    C3D_AlphaTest(true, GPU_GREATER, 128);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("alpha test");
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+    test_verts(3, -0.5f, 0xFFFFFF80);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("alpha blend");
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+
+    C3D_DepthTest(true, GPU_LEQUAL, GPU_WRITE_ALL);
+    apply_depth_range();
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_verts(3, -0.2f, 0x808080FF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("depth test and depth write");
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 40, 100, 200, 300);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("scissor");
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+
+    C3D_CullFace(GPU_CULL_BACK_CCW);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("cull back faces");
+    C3D_CullFace(GPU_CULL_NONE);
+
+    n3ds_tev_test_fog(1);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("fog LUT");
+    n3ds_tev_test_fog(0);
+
+    n3ds_tev_test_uniforms(1);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("vertex lighting, 1 light (shader loop)");
+    n3ds_tev_test_uniforms(8);
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    test_submit("vertex lighting, 8 lights");
+    n3ds_tev_test_uniforms(0);
+
+    test_verts(3, -0.5f, 0xFFFFFFFF);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 3);
+    readback(); /* EFB copy path: mid-frame sync + display transfer */
+    test_submit("color buffer readback (EFB copy)");
+
+    C3D_FrameEnd(0);
+    s_in_frame = 0;
+    gl_delete_textures(4, tex);
+    printf("[GPUTEST] all tests passed\n");
+}
+
 /* --- init --- */
 
 static void gl_init(void) {
@@ -507,6 +979,12 @@ static void gl_init(void) {
     if (done) return;
     done = 1;
     C3D_Init(N3DS_CMDBUF_SIZE);
+    {   /* CPU watchdog on the second core (O3DS: core 1, time-limited) */
+        s32 prio = 0x30;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        if (!threadCreate(watchdog_thread, NULL, 8 * 1024, prio - 2, 1, true))
+            threadCreate(watchdog_thread, NULL, 8 * 1024, prio - 2, -2, true);
+    }
     s_target = C3D_RenderTargetCreate(SCREEN_H, SCREEN_W, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     s_arena = (N3DSVtx*)linearAlloc(N3DS_VTX_ARENA);

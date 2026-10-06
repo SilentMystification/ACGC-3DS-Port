@@ -841,7 +841,9 @@ static void aAL_actor_draw(ACTOR* actor, GAME* game) {
     g_pc_title_main_menu_visible = 0; }
 #endif
 
-#ifdef TARGET_PC
+#if defined(TARGET_3DS)
+  /* no per-second logo trace: it floods the bottom-screen log */
+#elif defined(TARGET_PC)
   { extern int g_pc_verbose; if (g_pc_verbose && (aAL_draw_log_counter % 60) == 0) {
     printf("[LOGO] draw: action=%d pad_connected=%d back_opacity=%d copyright_opacity=%d press_start_opacity=%.0f\n",
            logo_actor->action, pad_connected, (int)logo_actor->back_opacity, (int)logo_actor->copyright_opacity, logo_actor->press_start_opacity);

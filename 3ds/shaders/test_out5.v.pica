@@ -1,0 +1,20 @@
+; test_out5.v.pica - GPU self-test B3: 2 inputs (as test A), all 5 outputs of gx.v.pica.
+.constf consts(1.0, 0.00392156862745, 0.0, 0.0)
+.alias ones consts.xxxx
+.alias inv255 consts.yyyy
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.proc main
+	mov outpos.xyz, v0
+	mov outpos.w, ones
+	mul outclr, inv255, v1
+	mov outtc0, v0
+	mov outtc1, v0
+	mov outtc2, v0
+	end
+.end

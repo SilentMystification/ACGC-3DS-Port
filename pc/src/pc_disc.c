@@ -125,7 +125,13 @@ static u8* yaz0_decode(const u8* src, u32 src_size, u32* out_size) {
 
     dec_size = be32(src + 4);
     dst = (u8*)malloc(dec_size);
-    if (!dst) return NULL;
+    if (!dst) {
+        printf("[PC] Yaz0: out of memory: could not allocate %u bytes for the decompressed data\n", dec_size);
+#ifdef TARGET_3DS
+        { extern u32 n3ds_heap_free(void); printf("[PC] Yaz0: heap free %u bytes\n", (unsigned)n3ds_heap_free()); }
+#endif
+        return NULL;
+    }
 
     sp = 16;
     dp = 0;
@@ -374,8 +380,12 @@ u8* pc_disc_extract_dol(void) {
     u8* buf;
     if (!g_disc_open) return NULL;
     buf = (u8*)malloc(g_dol_size);
-    if (!buf) return NULL;
+    if (!buf) {
+        printf("[PC] DOL: out of memory: could not allocate %u bytes\n", g_dol_size);
+        return NULL;
+    }
     if (!disc_read(&g_disc, g_dol_offset, buf, g_dol_size)) {
+        printf("[PC] DOL: disc read failed (%u bytes at offset 0x%X)\n", g_dol_size, g_dol_offset);
         free(buf);
         return NULL;
     }
@@ -394,8 +404,12 @@ u8* pc_disc_extract_rel(void) {
     }
 
     raw = (u8*)malloc(sz);
-    if (!raw) return NULL;
+    if (!raw) {
+        printf("[PC] REL: out of memory: could not allocate %u bytes to read foresta.rel.szs\n", sz);
+        return NULL;
+    }
     if (!disc_read(&g_disc, off, raw, sz)) {
+        printf("[PC] REL: disc read failed (%u bytes at offset 0x%X)\n", sz, off);
         free(raw);
         return NULL;
     }
@@ -406,7 +420,7 @@ u8* pc_disc_extract_rel(void) {
         u8* dec = yaz0_decode(raw, sz, &dec_sz);
         free(raw);
         if (!dec) {
-            if (g_pc_verbose) printf("[PC] Yaz0 decompression failed\n");
+            printf("[PC] REL: Yaz0 decompression of foresta.rel.szs failed (reason above)\n");
             return NULL;
         }
         if (g_pc_verbose)

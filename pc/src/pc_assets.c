@@ -29885,7 +29885,10 @@ int pc_assets_init(void) {
     }
 
     if (!rom_mode) {
-        printf("[PC] No ROM data found (no disc image, no pre-extracted DOL/REL)\n");
+        if (pc_disc_is_open())
+            printf("[PC] Disc image found, but its DOL/REL could not be loaded (reason above)\n");
+        else
+            printf("[PC] No ROM data found (no disc image, no pre-extracted DOL/REL)\n");
         return 0;
     }
 

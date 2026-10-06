@@ -143,13 +143,22 @@ set(N3DS_SOURCES
 # libctru headers keep the real name.
 ctr_add_shader_library(gx_shader shaders/gx.v.pica)
 dkp_add_embedded_binary_library(gx_shader_lib gx_shader)
+# GPU self-test shaders (n3ds_gl.c, "gputest")
+ctr_add_shader_library(test_min shaders/test_min.v.pica)
+ctr_add_shader_library(test_flat shaders/test_flat.v.pica)
+ctr_add_shader_library(gx_nolit shaders/gx_nolit.v.pica)
+ctr_add_shader_library(test_out5 shaders/test_out5.v.pica)
+ctr_add_shader_library(test_in4 shaders/test_in4.v.pica)
+ctr_add_shader_library(test_out3 shaders/test_out3.v.pica)
+ctr_add_shader_library(test_out4 shaders/test_out4.v.pica)
+dkp_add_embedded_binary_library(test_shader_lib test_min test_flat gx_nolit test_out5 test_in4 test_out3 test_out4)
 
 add_library(n3ds_platform OBJECT ${N3DS_SOURCES})
-target_link_libraries(n3ds_platform gx_shader_lib)
+target_link_libraries(n3ds_platform gx_shader_lib test_shader_lib)
 add_executable(ac_3ds $<TARGET_OBJECTS:n3ds_platform> ${PC_SOURCES} ${FIXNES_SOURCES} ${GAME_C_SOURCES} ${GAME_CXX_SOURCES})
 target_compile_definitions(ac_3ds PRIVATE osGetTime=ac_osGetTime)
 target_link_options(ac_3ds PRIVATE -Wl,--gc-sections)
-target_link_libraries(ac_3ds gx_shader_lib citro3d ctru m)
+target_link_libraries(ac_3ds gx_shader_lib test_shader_lib citro3d ctru m)
 
 ctr_create_3dsx(ac_3ds
     SMDH "${CMAKE_CURRENT_BINARY_DIR}/ac_3ds.smdh"

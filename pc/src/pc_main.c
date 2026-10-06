@@ -393,10 +393,12 @@ int main(int argc, char* argv[]) {
     pc_platform_init();
     pc_disc_init();
     if (!pc_assets_init()) {
-        const char* msg =
-            "No game data found.\n\n"
-            "Animal Crossing needs the original GameCube ROM to run.\n"
-            "Place a disc image (.iso, .gcm, or .ciso) to the \"rom\" subfolder.";
+        const char* msg = pc_disc_is_open()
+            ? "The disc image was found, but its game data could not be loaded.\n\n"
+              "The log above gives the reason (for example out of memory or a bad image)."
+            : "No game data found.\n\n"
+              "Animal Crossing needs the original GameCube ROM to run.\n"
+              "Place a disc image (.iso, .gcm, or .ciso) to the \"rom\" subfolder.";
         fprintf(stderr, "[PC] %s\n", msg);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
                                  "Animal Crossing - Missing ROM", msg, g_pc_window);

@@ -80,9 +80,21 @@ public class AzEnum {
   [DllImport("user32.dll")] static extern bool EnumWindows(CB cb, IntPtr p);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+  public static string Titles = "";
   public static int Count(uint pid) {
     int n = 0;
-    EnumWindows((h, p) => { uint q; GetWindowThreadProcessId(h, out q); if (q == pid && IsWindowVisible(h)) n++; return true; }, IntPtr.Zero);
+    var t = new System.Text.StringBuilder();
+    EnumWindows((h, p) => {
+      uint q; GetWindowThreadProcessId(h, out q);
+      if (q == pid && IsWindowVisible(h)) {
+        n++;
+        var sb = new System.Text.StringBuilder(256); GetWindowText(h, sb, 256);
+        t.Append("'" + sb.ToString() + "' ");
+      }
+      return true;
+    }, IntPtr.Zero);
+    Titles = t.ToString();
     return n;
   }
 }
@@ -113,7 +125,7 @@ try {
         if ($p.HasExited) { $reason = "Azahar exited"; break }
         if ($gdbProc -and $gdbProc.HasExited) { $reason = "gdb finished"; break }
         # Azahar shows a dialog on a guest CPU exception and the game stops: kill at once
-        if ([AzEnum]::Count([uint32]$p.Id) -gt 1) { Start-Sleep -Milliseconds 300; $reason = "Azahar dialog (exception or error)"; break }
+        if ([AzEnum]::Count([uint32]$p.Id) -gt 1) { Start-Sleep -Milliseconds 300; $reason = "Azahar dialog (exception or error), windows: $([AzEnum]::Titles)"; break }
         if ((Read-Tail $emuLog) -match "Exception Type:") { Start-Sleep -Milliseconds 500; $reason = "emulator exception"; break }
         if (-not (Test-Path $log)) { continue }
         # The game logs at least once per second; silence means a hang or an exception dialog
@@ -196,6 +208,21 @@ if ($i -ge 0) {
         $b = ($m.Groups[1].Value.Trim() -split "\s+")
         for ($k = 0; $k + 3 -lt $b.Count; $k += 4) { $addrs += ($b[$k + 3] + $b[$k + 2] + $b[$k + 1] + $b[$k]) }
     }
+}
+# Unmapped accesses: Azahar returns 0 and continues; real hardware faults. Report the top sites.
+$bad = @{}
+try {
+    $sr = New-Object IO.StreamReader([IO.File]::Open($emuLog, "Open", "Read", "ReadWrite"))
+    while (($line = $sr.ReadLine()) -ne $null) {
+        if ($line -match "UnmappedAccess.* at PC 0x([0-9A-F]{8})") { $bad[$Matches[1]] = 1 + [int]$bad[$Matches[1]] }
+    }
+    $sr.Close()
+} catch {}
+if ($bad.Count) {
+    $top = $bad.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3
+    Write-Output "--- WARNING: unmapped memory accesses (a fault on hardware) ---"
+    foreach ($t in $top) { Write-Output ("{0,8}x at PC 0x{1}" -f $t.Value, $t.Key) }
+    $addrs += $top | ForEach-Object { $_.Key }
 }
 $addrs = $addrs | ForEach-Object { [Convert]::ToUInt32($_, 16) } |
     Where-Object { $_ -ge 0x100000 -and $_ -lt 0x1000000 } | ForEach-Object { "0x{0:x8}" -f $_ } | Select-Object -Unique
