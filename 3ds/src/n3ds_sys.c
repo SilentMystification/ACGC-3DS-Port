@@ -130,6 +130,7 @@ static int s_netloaded; /* set in main: started by the Homebrew Launcher netload
 static char s_ring[LOG_RING];
 static LightLock s_log_lock;
 static LightEvent s_log_event;
+static volatile int s_log_stop; /* set by n3ds_log_stop: the log worker exits its loop */
 /* under s_log_lock */
 static u32 s_head;           /* bytes added */
 static u32 s_tail;           /* oldest byte that an output still needs */
@@ -299,6 +300,7 @@ static void log_worker(void* arg) {
     snprintf(msg, sizeof(msg), "[CORE] log worker on core %ld\n", (long)svcGetProcessorID());
     worker_note(msg);
     for (;;) {
+        if (s_log_stop) break; /* n3ds_log_stop: the app is closing, the framebuffer goes away next */
         s_worker_beat = svcGetSystemTick();
         LightEvent_WaitTimeout(&s_log_event, 50000000LL); /* 50 ms: also polls accept */
 
@@ -506,11 +508,14 @@ static void n3ds_install_log_tee(void) {
 }
 
 /* Log worker on core 1 (time-limited syscore on O3DS). If that fails, core 0 below the game. */
+static Thread s_log_thread; /* joined by n3ds_log_stop before gfxExit */
 static void n3ds_start_log_worker(void) {
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-    if (threadCreate(log_worker, NULL, 16 * 1024, prio + 1, 1, true)) return;
-    if (threadCreate(log_worker, NULL, 16 * 1024, prio + 1, -2, true)) {
+    s_log_thread = threadCreate(log_worker, NULL, 16 * 1024, prio + 1, 1, true);
+    if (s_log_thread) return;
+    s_log_thread = threadCreate(log_worker, NULL, 16 * 1024, prio + 1, -2, true);
+    if (s_log_thread) {
         printf("[CORE] log worker: core 1 refused, runs on the game core\n");
         return;
     }
@@ -518,6 +523,17 @@ static void n3ds_start_log_worker(void) {
     devoptab_list[STD_OUT] = console_dev;
     devoptab_list[STD_ERR] = console_dev;
     printf("[CORE] log worker: thread create failed, log on screen only\n");
+}
+
+/* Stop the log worker before the app exits. It exits at its next loop turn (50 ms at most). */
+void n3ds_log_stop(void) {
+    if (!s_log_thread) return;
+    s_log_stop = 1;
+    LightEvent_Signal(&s_log_event);
+    if (R_SUCCEEDED(threadJoin(s_log_thread, 500000000ULL))) { /* 0.5 s cap: never hang the exit */
+        threadFree(s_log_thread);
+        s_log_thread = NULL;
+    }
 }
 
 /* Crash handler: the part of the ring that the worker has not written yet goes to the SD log
@@ -697,6 +713,7 @@ int main(int argc, char* argv[]) {
         if (hidKeysDown() & KEY_START) break;
         gspWaitForVBlank();
     }
+    n3ds_log_stop(); /* the log worker writes to the framebuffer: stop it before gfxExit frees that */
     gfxExit();
     return g_ret;
 }

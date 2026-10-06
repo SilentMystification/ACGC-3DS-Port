@@ -15,6 +15,13 @@
 
 #ifdef TARGET_PC
 #include "pc_platform.h"
+#ifdef TARGET_3DS
+/* n3ds_calls.c is C: these must have C linkage in this C++ file */
+extern "C" {
+int n3ds_dl_want(void);
+void n3ds_dl_record(unsigned int op, unsigned int w0, unsigned int w1);
+}
+#endif
 #endif
 
 // this pragma may be unnecessary
@@ -5791,6 +5798,9 @@ u32 emu64::emu64_taskstart_r(Gfx* dl_p) {
             }
         }
 
+#ifdef TARGET_3DS
+        if (n3ds_dl_want()) n3ds_dl_record(this->gfx_cmd, this->gfx.words.w0, this->gfx.words.w1); /* [DL] dump */
+#endif
         u8 cmd_index = this->gfx_cmd - G_FIRST_CMD;
 #ifdef TARGET_PC
         {

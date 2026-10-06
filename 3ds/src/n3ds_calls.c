@@ -74,6 +74,51 @@ void n3ds_note_use(int kind, unsigned int key) {
     else s_use_overflow[kind]++;
 }
 
+/* [DL] one frame's emu64 command stream, for offline analysis (switch "dldump", frame N3DS_DL_FRAME).
+ * Recorded in RAM during that frame, written at its end to sdmc:/3ds/AnimalCrossing/dl_frame.bin:
+ * three little-endian u32 per command: opcode, w0, w1. Analyze with 3ds/tools/dlparse.py. */
+#define N3DS_DL_FRAME 300
+#define N3DS_DL_MAX 65536
+static unsigned int s_dl_buf[N3DS_DL_MAX][3];
+static unsigned int s_dl_n;
+static int s_dl_done;
+/* Always on for frame N3DS_DL_FRAME of each run. The "dldump" switch did not register on the 3DS
+ * (debug line showed 0x0), so the switch is not used here. */
+int n3ds_dl_want(void) {
+    return !s_dl_done && n3ds_frame_id == N3DS_DL_FRAME;
+}
+void n3ds_dl_record(unsigned int op, unsigned int w0, unsigned int w1) {
+    if (s_dl_n < N3DS_DL_MAX) {
+        s_dl_buf[s_dl_n][0] = op;
+        s_dl_buf[s_dl_n][1] = w0;
+        s_dl_buf[s_dl_n][2] = w1;
+        s_dl_n++;
+    }
+}
+/* called at each frame end, before the frame id moves on */
+void n3ds_dl_flush(void) {
+    if (s_dl_done || n3ds_frame_id != N3DS_DL_FRAME) return;
+    s_dl_done = 1;
+    FILE* f = fopen("sdmc:/3ds/AnimalCrossing/dl_frame.bin", "wb");
+    if (f) {
+        fwrite(s_dl_buf, sizeof(s_dl_buf[0]), s_dl_n, f);
+        fclose(f);
+    }
+    printf("[DL] frame %u: %u commands written to sdmc:/3ds/AnimalCrossing/dl_frame.bin (%s)\n",
+           (unsigned int)N3DS_DL_FRAME, s_dl_n, f ? "ok" : "open failed");
+    /* the same counts in the live log, so no FTP pull is needed */
+    static unsigned int hist[256];
+    for (unsigned int i = 0; i < s_dl_n; i++) hist[s_dl_buf[i][0] & 0xFF]++;
+    unsigned int tris = 0;
+    for (int op = 0; op < 256; op++) {
+        if (!hist[op]) continue;
+        printf("[DL] op %02X count %u\n", op, hist[op]);
+    }
+    tris = hist[0x05] + 2 * (hist[0x06] + hist[0x07]);
+    printf("[DL] summary: commands %u, tri1/tri2/quad triangles %u, mtx %u, dl jumps %u\n",
+           s_dl_n, tris, hist[0xDA], hist[0xDE]);
+}
+
 void n3ds_emu64_report(void) {
     static unsigned int calls[256];
     unsigned long long sum_calls = 0;

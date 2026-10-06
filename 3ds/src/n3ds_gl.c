@@ -484,6 +484,7 @@ void n3ds_gl_swap(void) {
     ensure_frame();
     if (s_arena_used) GSPGPU_FlushDataCache(s_arena, s_arena_used * sizeof(N3DSVtx));
     s_step = "FrameEnd (submit)";
+    { extern void n3ds_dl_flush(void); n3ds_dl_flush(); } /* [DL] write the dumped frame, if this is it */
     { extern unsigned int n3ds_frame_id; n3ds_frame_id++; } /* [USE] per-frame counting (n3ds_calls.c) */
     extern unsigned long long n3ds_frame_end_ticks;
     unsigned long long t_end = svcGetSystemTick();

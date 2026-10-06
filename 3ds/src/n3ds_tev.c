@@ -41,7 +41,7 @@ int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls", "nomvflush", "nogxvtx", "palflush", "palone" };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls", "nomvflush", "nogxvtx", "palflush", "palone", "dldump" };
     extern char g_n3ds_args[]; /* n3ds_sys.c: 3dslink arguments */
     char buf[512] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
@@ -51,7 +51,7 @@ static void read_debug_switches(void) {
     }
     strncat(buf, g_n3ds_args, 255);
     if (!buf[0]) return;
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 17; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }
