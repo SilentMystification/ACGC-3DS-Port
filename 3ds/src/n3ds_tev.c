@@ -640,11 +640,21 @@ static void n3ds_fog(void) {
 
 /* The batch palette (pc_gx.c): n pairs of position 3x4 and normal 3x3, one pair per slot. Slot k uses
  * shader rows 3k..3k+2. Called right before the batch draws. */
+/* Copy of what the GPU palette holds. Only entries that differ are written (every draw calls this). */
+static float s_up_pos[9][12], s_up_nrm[9][9];
+static int s_up_n; /* entries written since the cache was cleared */
 void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n) {
     for (int k = 0; k < n; k++) {
-        set_rows(s_u.pmv + 3 * k, pos + 12 * k, 3, 4);
-        set_rows(s_u.pnrm + 3 * k, nrm + 9 * k, 3, 3);
+        const float* p = pos + 12 * k;
+        const float* m = nrm + 9 * k;
+        if (k < s_up_n && !memcmp(s_up_pos[k], p, sizeof(s_up_pos[k])) && !memcmp(s_up_nrm[k], m, sizeof(s_up_nrm[k])))
+            continue;
+        set_rows(s_u.pmv + 3 * k, p, 3, 4);
+        set_rows(s_u.pnrm + 3 * k, m, 3, 3);
+        memcpy(s_up_pos[k], p, sizeof(s_up_pos[k]));
+        memcpy(s_up_nrm[k], m, sizeof(s_up_nrm[k]));
     }
+    if (n > s_up_n) s_up_n = n;
 }
 
 /* Called from pc_gx_flush_vertices with the dirty groups. MODELVIEW is not here: the palette carries it. */
@@ -678,6 +688,7 @@ void n3ds_tev_bind_main(void) {
 void n3ds_tev_test_uniforms(int nlights) {
     static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     set_rows(s_u.proj, id, 4, 4);
+    s_up_n = 0; /* the self-test overwrites the palette: forget what the GPU holds */
     set_rows(s_u.pmv, id, 3, 4); /* palette slot 0 = identity; self-test vertices use index 0 */
     set_rows(s_u.pnrm, id, 3, 4);
     set_rows(s_u.texmtx0, id, 2, 4);
