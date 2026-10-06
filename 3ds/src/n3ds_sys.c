@@ -78,6 +78,54 @@ static void n3ds_install_log_tee(void) {
     setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
+/* CPU exception -> "[CRASH]" lines in log.txt, then halt. 3ds/run_azahar.ps1 runs
+ * addr2line on them. Stack words below 16MB are possible return addresses
+ * (code and static data live there); addr2line drops the ones that are not code. */
+/* ponytail: one handler stack for all threads; two faults at once would share it */
+static u8 crash_stack[0x4000] __attribute__((aligned(8)));
+
+static void crash_log(const char* s, int n) {
+    svcOutputDebugString(s, n);
+    if (log_fd >= 0) write(log_fd, s, (size_t)n);
+}
+
+static void crash_handler(ERRF_ExceptionInfo* excep, CpuRegisters* regs) {
+    static const char* const names[] = { "prefetch abort", "data abort", "undefined instruction", "VFP" };
+    char buf[160];
+    int n = snprintf(buf, sizeof(buf), "\n[CRASH] %s thread=%lx pc=%08lx lr=%08lx sp=%08lx far=%08lx\n",
+                     excep->type < 4 ? names[excep->type] : "?", (unsigned long)threadGetCurrent(),
+                     (unsigned long)regs->pc, (unsigned long)regs->lr, (unsigned long)regs->sp,
+                     (unsigned long)excep->far);
+    crash_log(buf, n);
+    for (int i = 0; i < 13; i += 4) {
+        n = snprintf(buf, sizeof(buf), "[CRASH] r%d-r%d %08lx %08lx %08lx %08lx\n", i, i + 3,
+                     (unsigned long)regs->r[i], (unsigned long)(i + 1 < 13 ? regs->r[i + 1] : 0),
+                     (unsigned long)(i + 2 < 13 ? regs->r[i + 2] : 0), (unsigned long)(i + 3 < 13 ? regs->r[i + 3] : 0));
+        crash_log(buf, n);
+    }
+    const u32* sp = (const u32*)(regs->sp & ~3u);
+    n = snprintf(buf, sizeof(buf), "[CRASH] stack");
+    for (int i = 0, found = 0; i < 1024 && found < 48; i++) {
+        u32 v = sp[i];
+        if (v < 0x00100000 || v >= 0x01000000) continue;
+        n += snprintf(buf + n, sizeof(buf) - n, " %08lx", (unsigned long)v);
+        if (++found % 12 == 0) {
+            buf[n++] = '\n';
+            crash_log(buf, n);
+            n = snprintf(buf, sizeof(buf), "[CRASH] stack");
+        }
+    }
+    buf[n++] = '\n';
+    crash_log(buf, n);
+    svcBreak(USERBREAK_PANIC);
+    for (;;) {}
+}
+
+/* Per thread: call at the start of every thread the game creates. */
+void n3ds_install_crash_handler(void) {
+    threadOnException(crash_handler, crash_stack + sizeof(crash_stack), WRITE_DATA_TO_HANDLER_STACK);
+}
+
 /* Called from SDL_Init (pc_platform_init). */
 void n3ds_platform_init(void) {
     static int done;
@@ -108,6 +156,7 @@ static int g_ret;
 
 static void game_thread(void* arg) {
     (void)arg;
+    n3ds_install_crash_handler();
     g_ret = pc_main_entry(g_argc, g_argv);
 }
 

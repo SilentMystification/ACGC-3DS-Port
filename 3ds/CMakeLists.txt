@@ -49,7 +49,7 @@ foreach(pat
         ".*/ac_npc_shop_common\\.c$" ".*/ac_animal_logo_misc\\.c$" ".*/m_item_debug\\.c$"
         ".*/actor/npc/.*_anime\\.c$" ".*/osreport\\.c$" ".*/Famicom/.*" ".*/MSL_C/.*"
         ".*/jaudio_NES/internal/dsp_cardunlock\\.c$" ".*/jaudio_NES/internal/dsp_GBAKey\\.c$"
-        ".*/libc64/malloc\\.c$" ".*/libc64/sprintf\\.c$" ".*/libc64/aprintf\\.c$"
+        ".*/libc64/sprintf\\.c$" ".*/libc64/aprintf\\.c$"
         ".*/libultra/.*" ".*/ReconfigBATs\\.c$" ".*/executor\\.c$" ".*/ef_effect_lib\\.c$"
         ".*/m_card\\.c$" ".*/emu64_utility\\.c$")
     list(FILTER GAME_C_SOURCES EXCLUDE REGEX "${pat}")
@@ -79,11 +79,10 @@ set_source_files_properties(${GAME_C_SOURCES} ${GAME_CXX_SOURCES} PROPERTIES COM
 set_source_files_properties("${DECOMP_ROOT}/src/main.c" PROPERTIES COMPILE_DEFINITIONS "main=ac_entry")
 set_source_files_properties("${DECOMP_ROOT}/src/static/boot.c" PROPERTIES COMPILE_DEFINITIONS "main=boot_main")
 
-# --- PC port layer, reused as-is through the SDL/GL shims ---
+# --- PC port layer, reused through the SDL/GL shims (n3ds_tev.c replaces pc_gx_tev.c) ---
 set(PC_SOURCES
     ${PC_DIR}/src/pc_main.c
     ${PC_DIR}/src/pc_gx.c
-    ${PC_DIR}/src/pc_gx_tev.c
     ${PC_DIR}/src/pc_gx_texture.c
     ${PC_DIR}/src/pc_gbi_runtime.c
     ${PC_DIR}/src/pc_os.c
@@ -134,17 +133,22 @@ set_source_files_properties(${FIXNES_SOURCES} PROPERTIES
 set(N3DS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_sys.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_sdl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_gl_stub.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_gl.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/n3ds_tev.c
 )
 
 # libctru exports osGetTime (os.o, pulled in by osGetMemRegionFree etc.), and so does the
 # game's libultra layer. Rename the game's copy; the 3DS layer builds separately so the
 # libctru headers keep the real name.
+ctr_add_shader_library(gx_shader shaders/gx.v.pica)
+dkp_add_embedded_binary_library(gx_shader_lib gx_shader)
+
 add_library(n3ds_platform OBJECT ${N3DS_SOURCES})
+target_link_libraries(n3ds_platform gx_shader_lib)
 add_executable(ac_3ds $<TARGET_OBJECTS:n3ds_platform> ${PC_SOURCES} ${FIXNES_SOURCES} ${GAME_C_SOURCES} ${GAME_CXX_SOURCES})
 target_compile_definitions(ac_3ds PRIVATE osGetTime=ac_osGetTime)
 target_link_options(ac_3ds PRIVATE -Wl,--gc-sections)
-target_link_libraries(ac_3ds citro3d ctru m)
+target_link_libraries(ac_3ds gx_shader_lib citro3d ctru m)
 
 ctr_create_3dsx(ac_3ds
     SMDH "${CMAKE_CURRENT_BINARY_DIR}/ac_3ds.smdh"

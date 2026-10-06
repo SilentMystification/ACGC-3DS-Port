@@ -767,6 +767,15 @@ void pc_gx_flush_vertices(void) {
     glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
 
     /* Upload only dirty state groups */
+#ifdef TARGET_3DS
+    if (shader) {
+        /* citro3d combiners and shader uniforms (3ds/src/n3ds_tev.c) */
+        extern void n3ds_gx_upload(unsigned int dirty);
+        Uint64 uniform_start = pc_profiler_begin_timer();
+        n3ds_gx_upload(g_gx.dirty);
+        pc_profiler_add_time(PC_PROF_TIMER_UNIFORM_UPLOAD, uniform_start);
+    }
+#else
     if (shader) {
         Uint64 uniform_start = pc_profiler_begin_timer();
         GLint loc;
@@ -1022,6 +1031,7 @@ void pc_gx_flush_vertices(void) {
             }
         }
     }
+#endif
 
     GLenum gl_prim;
     switch (g_gx.current_primitive) {

@@ -193,6 +193,7 @@ void __OSUnhandledException(u8 type, void* ctx, u32 dsisr, u32 dar) {
 /* --- libc64 malloc replacement (PC uses system malloc) --- */
 /* game's own malloc arena — we just wrap system malloc */
 
+#ifndef TARGET_3DS /* 3DS: src/static/libc64/malloc.c manages the arena */
 static int malloc_initialized = 0;
 static void* malloc_arena_base = NULL;
 static unsigned long malloc_arena_size = 0;
@@ -218,5 +219,6 @@ void GetFreeArena(unsigned long* max, unsigned long* free_size, unsigned long* a
 }
 
 void DisplayArena(void) { }
+#endif
 
 int CheckArena(void) { return 0; }

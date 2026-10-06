@@ -3,6 +3,14 @@
 
 #include "types.h"
 
+#ifdef TARGET_3DS
+/* The game's arena allocator (src/static/libc64/malloc.c on the MallocInit block).
+ * Only the files that include this header use it. The PC build maps these to the
+ * system malloc and leaves the arena unused, which the 3DS cannot afford. */
+#define malloc libc64_malloc
+#define free libc64_free
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

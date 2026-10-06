@@ -29,8 +29,10 @@ struct SDL_Thread {
     int status;
 };
 
+extern void n3ds_install_crash_handler(void);
 static void n3ds_thread_entry(void* arg) {
     SDL_Thread* t = (SDL_Thread*)arg;
+    n3ds_install_crash_handler();
     t->status = t->fn(t->data);
 }
 
@@ -159,7 +161,7 @@ void SDL_CloseAudioDevice(SDL_AudioDeviceID dev) {
     audio_open = 0;
 }
 
-/* --- window / GL: no-ops --- */
+/* --- window / GL (drawing is in n3ds_gl.c) --- */
 
 static int dummy_window;
 SDL_Window* SDL_CreateWindow(const char* t, int x, int y, int w, int h, Uint32 f) {
@@ -195,7 +197,8 @@ int SDL_GL_SetAttribute(SDL_GLattr a, int v) { (void)a; (void)v; return 0; }
 SDL_GLContext SDL_GL_CreateContext(SDL_Window* w) { (void)w; return (SDL_GLContext)&dummy_window; }
 void SDL_GL_DeleteContext(SDL_GLContext c) { (void)c; }
 int SDL_GL_SetSwapInterval(int i) { (void)i; return 0; }
-void SDL_GL_SwapWindow(SDL_Window* w) { (void)w; }
+extern void n3ds_gl_swap(void);
+void SDL_GL_SwapWindow(SDL_Window* w) { (void)w; n3ds_gl_swap(); }
 void SDL_GL_GetDrawableSize(SDL_Window* w, int* width, int* height) {
     (void)w;
     if (width) *width = 400;
