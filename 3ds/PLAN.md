@@ -211,11 +211,12 @@ Running list. Add items as they come up. Tick them off with the measurement that
 
 ## Known issues
 
-- **Batch merge bug (batching OFF).** Merging draw groups into one batch (per-vertex matrix palette,
-  `pc_gx.c` `pal_for_group`) renders wrong textures and placement on the title screen. Bisect:
-  one draw per group is correct (`palflush`); merging only groups with the same matrix pair is wrong
-  (`palone`); a texture-state guard did not fix it. Not found yet. Batching is off in
-  `pal_for_group` until this is fixed.
+- **Batch merge bug (fixed in Azahar, hardware not checked).** Merging draw groups into one batch
+  (per-vertex matrix palette, `pc_gx.c` `pal_for_group`) rendered wrong textures and placement.
+  Cause: `pc_gx_draw_pending` reset the palette while a later group still referenced its slots, so the
+  next upload sent an empty palette. Fix: the palette resets only when it opens a new batch. Title
+  screen correct in Azahar with batching on, draws about 130 to 150 per frame (was about 200).
+  Switch `palflush` (bit 16384) turns batching off for bisects.
 - **O3DS audio queue overflow.** `SendStart::Mesg Full Queue` (now rate-limited to one line per 600
   drops). The mixer costs ~2.1 ms per audio frame and reaches 57–60 frames/s while it runs, so CPU
   cost is not the cause; the audio thread stalls at times on the time-limited core 1. Dropped

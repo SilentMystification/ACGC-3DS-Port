@@ -299,9 +299,7 @@ static float s_grp_pal; /* palette offset for the group being submitted */
 extern void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n);
 static void pal_for_group(void) {
     extern int g_n3ds_dbg;
-    /* Batching is OFF: merged groups render wrong textures (see 3ds/PLAN.md, "Batch merge bug").
-     * Each group draws alone until the merge bug is found. */
-    pc_gx_draw_pending();
+    if (g_n3ds_dbg & 16384) pc_gx_draw_pending(); /* debug switch "palflush": one draw per group */
     /* g_n3ds_dbg is read again below for "palone" */
     const float* p = &g_gx.pos_mtx[g_gx.current_mtx][0][0];
     const float* n = &g_gx.nrm_mtx[g_gx.current_mtx][0][0];
@@ -312,7 +310,10 @@ static void pal_for_group(void) {
         }
     }
     int cap = (g_n3ds_dbg & 32768) ? 1 : PAL_N; /* debug switch "palone": one matrix pair per batch */
-    if (s_pal_n >= cap) pc_gx_draw_pending(); /* palette full: end the batch; the draw resets s_pal_n */
+    if (s_pal_n >= cap) { /* palette full: draw the batch, then open a new palette (no group references it now) */
+        pc_gx_draw_pending();
+        s_pal_n = 0;
+    }
     int k = s_pal_n++;
     memcpy(s_pal_pos[k], p, sizeof(s_pal_pos[k]));
     memcpy(s_pal_nrm[k], n, sizeof(s_pal_nrm[k]));
@@ -745,9 +746,9 @@ void pc_gx_draw_pending(void) {
     int count = g_gx.pending_verts;
     if (count == 0) return;
 #ifdef TARGET_3DS
-    /* the batch's palette goes to the shader before the draw; the next batch starts a new palette */
+    /* the palette goes to the shader before the draw. It is not reset here: a group that is not drawn yet
+     * can still reference its slots. pal_for_group resets it when it opens a new batch. */
     n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
-    s_pal_n = 0;
 #endif
 
     glBindVertexArray(g_gx.vao);
