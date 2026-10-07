@@ -608,8 +608,8 @@ void n3ds_platform_init(void) {
 
     bool is_new = false;
     APT_CheckNew3DS(&is_new);
-    /* TODO(N3DS): osSetSpeedupEnable(true) gives 804 MHz and the 2 MB L2 cache, and N3DS has
-     * core 2 for the app. Off for now: the target is 60 fps on O3DS at 268 MHz (3ds/PLAN.md). */
+    /* N3DS mode: 804 MHz and the 2 MB L2 cache. The same 3dsx runs on O3DS, where this stays at 268 MHz. */
+    if (is_new) osSetSpeedupEnable(true);
     /* Core 1 (system core) for the log worker and the audio mixer: the highest accepted limit.
      * The APT hook gives 30% back while the HOME menu runs. */
     static const u32 limits_o3ds[] = { 79, 69, 30 }, limits_n3ds[] = { 80, 79, 69, 30 };
@@ -641,6 +641,7 @@ void n3ds_platform_init(void) {
     aptHook(&s_apt_cookie, apt_log_hook, NULL);
     if (s_live_status[0]) printf("%s\n", s_live_status);
     printf("Animal Crossing 3DS (%s)\n", is_new ? "N3DS" : "O3DS");
+    printf("[SYS] mode: %s\n", is_new ? "New 3DS, speedup requested (804 MHz, L2 cache)" : "Old 3DS (268 MHz)");
     if (s_cpu_limit) printf("[APT] core-1 limit %lu%%\n", (unsigned long)s_cpu_limit);
     else printf("[APT] core-1 limit: all values refused (0x%08lX), worker threads share core 0\n", (unsigned long)lim_rc);
     {

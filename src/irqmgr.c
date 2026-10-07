@@ -184,7 +184,9 @@ extern void CreateIRQManager(void* stack, size_t stack_size, int priority, u8 re
   osCreateMesgQueue(&this->_msgQueue, this->_msgBuf, 8);
   osViSetEvent(&this->_msgQueue, (OSMessage)IRQ_RETRACE_MSG, retracecount);
   osCreateThread2(&this->thread, 9, irqmgr_Main, NULL, stack, stack_size, priority);
+#ifndef TARGET_3DS /* 3DS test: the IRQ thread stays off (it crashed when run for real); see 3ds/PLAN.md */
   osStartThread(&this->thread);
+#endif
 }
 
 /* these were probably written in a header directly and included here */

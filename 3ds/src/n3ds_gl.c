@@ -21,7 +21,7 @@
 #include "test_out4_shbin.h"
 
 #define N3DS_GX_PROG 0x7FFF0001u
-#define N3DS_CMDBUF_SIZE (1024 * 1024)
+#define N3DS_CMDBUF_SIZE (2 * 1024 * 1024) /* 1 MB overflowed (GPUCMD_AddInternal) with the menu thread running */
 #define N3DS_VTX_ARENA (1536 * 1024)
 #define SCREEN_W 400
 #define SCREEN_H 240
@@ -36,6 +36,7 @@ typedef struct N3DSTex {
     int valid;
     GPU_TEXTURE_WRAP_PARAM wrap_s, wrap_t;
     GPU_TEXTURE_FILTER_PARAM filter;
+    int rot; /* screen capture: the color buffer tiles as is (memory row = screen x), see n3ds_gl_capture_screen */
     struct N3DSTex* next_free;
 } N3DSTex;
 
@@ -201,6 +202,10 @@ static void gl_use_program(GLuint p) { s_program = p; }
 /* --- frame --- */
 
 static void free_deleted_textures(void) {
+    if (s_free_list) {
+        extern void n3ds_tex_units_detach(void);
+        n3ds_tex_units_detach(); /* no unit may keep a pointer into memory freed below */
+    }
     while (s_free_list) {
         N3DSTex* t = s_free_list;
         s_free_list = t->next_free;
@@ -361,6 +366,41 @@ static int readback(void) {
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     GSPGPU_InvalidateDataCache(s_readback, SCREEN_W * SCREEN_H * 4);
     return 1;
+}
+
+static void apply_tex_params(N3DSTex* t);
+
+/* EFB copy of the whole screen, GPU only: the color buffer tiles go into a 256x512 RGBA8 texture
+ * with one TextureCopy. No CPU readback (in Azahar that read returned the previous copy's pixels)
+ * and no re-upload. The texture keeps the target's rotation: texture row m = screen x,
+ * column = screen y (up). n3ds_tev.c rotates the texcoords of draws that sample it (rot = 1).
+ * Returns 0 if out of memory; the caller then uses the readback path. */
+GLuint n3ds_gl_capture_screen(void) {
+    N3DSTex* t = (N3DSTex*)calloc(1, sizeof(N3DSTex));
+    if (!t) return 0;
+    if (!C3D_TexInitVRAM(&t->tex, 256, 512, GPU_RGBA8) && !C3D_TexInit(&t->tex, 256, 512, GPU_RGBA8)) {
+        free(t);
+        return 0;
+    }
+    s_step = "screen capture";
+    ensure_frame();
+    sync_midframe(); /* the frame's draws must be in the color buffer */
+    const u32 line = SCREEN_H * 8 * 4; /* one row of 8x8 tiles of the target, bytes */
+    C3D_SyncTextureCopy((u32*)s_target->frameBuf.colorBuf, GX_BUFFER_DIM(line >> 4, 0), (u32*)t->tex.data,
+                        GX_BUFFER_DIM(line >> 4, (256 * 8 * 4 - line) >> 4), line * (SCREEN_W / 8),
+                        GX_TRANSFER_RAW_COPY(1));
+    t->valid = 1;
+    t->rot = 1;
+    t->wrap_s = t->wrap_t = GPU_CLAMP_TO_EDGE;
+    t->filter = GPU_LINEAR;
+    apply_tex_params(t);
+    s_stat_copies++;
+    return (GLuint)(uintptr_t)t;
+}
+
+int n3ds_gl_tex_rot(GLuint name) {
+    N3DSTex* t = (N3DSTex*)(uintptr_t)name;
+    return t && t->valid && t->rot;
 }
 
 /* GL window pixel (x, y), y up -> 0xRRGGBBAA */
@@ -1081,6 +1121,7 @@ static void gl_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, G
     u8* out = (u8*)px;
     s_stat_copies++;
     if (!readback()) {
+        printf("[EFB] readback failed: linear free %luK\n", (unsigned long)(linearSpaceFree() >> 10));
         memset(px, 0, (size_t)w * (size_t)h * 4);
         return;
     }

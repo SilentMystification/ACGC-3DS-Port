@@ -82,6 +82,10 @@ static int s_efb_capture_count = 0;
 void pc_gx_efb_capture_store(u32 dest_ptr, GLuint gl_tex) {
     for (int i = 0; i < s_efb_capture_count; i++) {
         if (s_efb_captures[i].dest_ptr == dest_ptr) {
+#ifdef TARGET_3DS
+            printf("[EFB] store %08lx: tex %08lx -> %08lx\n", (unsigned long)dest_ptr,
+                   (unsigned long)s_efb_captures[i].gl_tex, (unsigned long)gl_tex);
+#endif
             if (s_efb_captures[i].gl_tex)
                 glDeleteTextures(1, &s_efb_captures[i].gl_tex);
             s_efb_captures[i].gl_tex = gl_tex;
@@ -95,6 +99,10 @@ void pc_gx_efb_capture_store(u32 dest_ptr, GLuint gl_tex) {
                 (MAX_EFB_CAPTURES - 1) * sizeof(s_efb_captures[0]));
         s_efb_capture_count = MAX_EFB_CAPTURES - 1;
     }
+#ifdef TARGET_3DS
+    printf("[EFB] store %08lx: new tex %08lx (slot %d)\n", (unsigned long)dest_ptr, (unsigned long)gl_tex,
+           s_efb_capture_count);
+#endif
     s_efb_captures[s_efb_capture_count].dest_ptr = dest_ptr;
     s_efb_captures[s_efb_capture_count].gl_tex = gl_tex;
     s_efb_capture_count++;
@@ -2149,6 +2157,10 @@ static void pc_gx_copy_tex_execute_impl(void* dest, GXBool clear) {
 
     int out_wd = g_gx.tex_copy_src[2];
     int out_ht = g_gx.tex_copy_src[3];
+#ifdef TARGET_3DS
+    printf("[EFB] copy dest %08lx src %d,%d %dx%d window %dx%d\n", (unsigned long)(uintptr_t)dest,
+           g_gx.tex_copy_src[0], g_gx.tex_copy_src[1], out_wd, out_ht, g_pc_window_w, g_pc_window_h);
+#endif
     if (out_wd <= 0 || out_ht <= 0) return;
     if (out_wd > 4096 || out_ht > 4096) return;
 
@@ -2176,12 +2188,34 @@ static void pc_gx_copy_tex_execute_impl(void* dest, GXBool clear) {
     int gl_y = g_pc_window_h - (read_top + read_ht);
     if (gl_y < 0) return;
 
+#if defined(TARGET_3DS) && defined(PC_ENHANCEMENTS)
+    /* Whole screen (every copy this game makes): GPU-only capture, no readback */
+    if (read_left == 0 && gl_y == 0 && read_wd == g_pc_window_w && read_ht == g_pc_window_h) {
+        extern GLuint n3ds_gl_capture_screen(void);
+        GLuint cap = n3ds_gl_capture_screen();
+        if (cap) {
+            printf("[EFB] gpu capture %08lx -> tex %08lx\n", (unsigned long)(uintptr_t)dest, (unsigned long)cap);
+            pc_gx_efb_capture_store((u32)(uintptr_t)dest, cap);
+            pc_gx_texture_bind_cache_invalidate();
+            DIRTY(PC_GX_DIRTY_TEXTURES);
+            return;
+        }
+    }
+#endif
+
     size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;
     u8* rgba = (u8*)malloc(rgba_size);
     if (!rgba) return;
 
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(read_left, gl_y, read_wd, read_ht, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+#ifdef TARGET_3DS
+    { /* pixel checksum: the same value on two copies of different scenes = stale readback */
+        u32 sum = 2166136261u;
+        for (size_t k = 0; k < rgba_size; k += 4) sum = (sum ^ *(u32*)(rgba + k)) * 16777619u;
+        printf("[EFB] read %d,%d %dx%d sum %08lx\n", read_left, gl_y, read_wd, read_ht, (unsigned long)sum);
+    }
+#endif
 
 #ifdef PC_ENHANCEMENTS
     /* Store as full-res GL texture; GXLoadTexObj will substitute it for the RGB565 buffer */

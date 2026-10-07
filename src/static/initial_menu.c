@@ -349,7 +349,11 @@ extern void proc(void* arg) {
   int proc_done;
   OSTimer timer;
 
+#ifdef TARGET_3DS
+  msg = 0; /* 3DS: the menu runs inline from initial_menu_cleanup; the messages are read in the loop */
+#else
   osRecvMesg(&commandQ, (OSMessage*)&msg, OS_MESSAGE_BLOCK);
+#endif
   progressive_mode = FALSE;
   fadeout_step = 0;
   menu_step = 0;
@@ -386,6 +390,7 @@ extern void proc(void* arg) {
       JC_JFWDisplay_startFadeOut(JC_JFWDisplay_getManager(), 32);
     }
 
+    if (frame_count % 60 == 0) printf("[MENU] frame %d select=%d load=%d fade=%d\n", frame_count, select_done, load_game_done, fadeout_step);
     if ((menu_step != 0 && menu_step != 3) || dvderr_draw() == FALSE) {
       JW_BeginFrame();
       keycheck();
@@ -438,7 +443,11 @@ extern void initial_menu_cleanup() {
   if (Thread_p != NULL) {
     if (!osRecvMesg(&commandQ, (OSMessage*)&msg, OS_MESSAGE_NOBLOCK)) {
       osSendMesg(&commandQ, (OSMessage)INITIAL_MENU_OSMESG_LOAD_GAME_DONE, OS_MESSAGE_NOBLOCK);
+#ifdef TARGET_3DS
+      proc(NULL); /* run the menu on this thread: no second thread may use the GPU; it sends statusQ at its end */
+#endif
       osRecvMesg(&statusQ, (OSMessage*)&msg, OS_MESSAGE_BLOCK);
+      printf("[MENU] cleanup: menu thread done\n");
     }
 
     osDestroyThread(Thread_p);

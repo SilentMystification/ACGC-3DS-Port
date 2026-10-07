@@ -203,8 +203,17 @@ void osCreateThread2(void* thread, int id, void (*entry)(void*), void* arg,
 }
 
 void osStartThread(void* thread) {
-    /* don't actually start threads — single-threaded mode */
+    /* Default: single-threaded (the entry is dropped). Debug switch "threads" (bit 524288) runs the entry
+     * on a real thread, for testing the logo and menu flow. */
     (void)thread;
+#ifdef TARGET_3DS
+    {
+        extern int g_n3ds_dbg;
+        if ((g_n3ds_dbg & 524288) && pending_thread_entry) {
+            SDL_CreateThread((SDL_ThreadFunction)pending_thread_entry, "os_thread", pending_thread_arg);
+        }
+    }
+#endif
     pending_thread_entry = NULL;
     pending_thread_arg = NULL;
 }

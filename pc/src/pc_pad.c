@@ -171,6 +171,19 @@ u32 PADRead(PADStatus* status) {
     status[0].substickY = cstickY;
     status[0].err = 0; /* PAD_ERR_NONE */
 
+#ifdef TARGET_3DS
+    { /* debug switch "pad" (bit 262144): print the pad state when it changes */
+        static u16 last_b;
+        static s8 last_x, last_y;
+        extern int g_n3ds_dbg;
+        if ((g_n3ds_dbg & 262144) && (buttons != last_b || stickX != last_x || stickY != last_y)) {
+            printf("[PAD] buttons %04X stick %d,%d\n", buttons, stickX, stickY);
+            last_b = buttons;
+            last_x = stickX;
+            last_y = stickY;
+        }
+    }
+#endif
     return PAD_CHAN0_BIT; /* Controller 1 connected */
 }
 

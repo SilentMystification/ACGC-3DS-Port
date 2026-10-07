@@ -119,6 +119,10 @@ void n3ds_dl_flush(void) {
            s_dl_n, tris, hist[0xDA], hist[0xDE]);
 }
 
+/* [DIRTY] emu64 dirty flags seen on each dirty_check call, per 600-frame window (src/.../emu64.c) */
+unsigned int pc_emu64_dirty_count[64];
+unsigned int pc_emu64_dirty_calls;
+
 void n3ds_emu64_report(void) {
     static unsigned int calls[256];
     unsigned long long sum_calls = 0;
@@ -149,6 +153,11 @@ void n3ds_emu64_report(void) {
     memset(pc_gx_site, 0, sizeof(pc_gx_site));
     memset(pc_gx_flush_reason, 0, sizeof(pc_gx_flush_reason));
     memset(pc_gx_dirty_bits, 0, sizeof(pc_gx_dirty_bits));
+    printf("[DIRTY] dirty_check calls %u per window\n", pc_emu64_dirty_calls);
+    for (int f = 0; f < 32; f++)
+        if (pc_emu64_dirty_count[f]) printf("[DIRTY] flag %2d set on %u checks\n", f, pc_emu64_dirty_count[f]);
+    memset(pc_emu64_dirty_count, 0, sizeof(pc_emu64_dirty_count));
+    pc_emu64_dirty_calls = 0;
 }
 
 extern int __real___aeabi_idiv(int, int);

@@ -680,6 +680,14 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
     {
         GLuint efb_tex = pc_gx_efb_capture_find(o[TEXOBJ_IMAGE_PTR]);
         if (efb_tex) {
+#ifdef TARGET_3DS
+            static GLuint last_logged;
+            if (efb_tex != last_logged) { /* once per new capture, not per bind */
+                last_logged = efb_tex;
+                printf("[EFB] use %08lx: tex %08lx %dx%d fmt %lu\n", (unsigned long)o[TEXOBJ_IMAGE_PTR],
+                       (unsigned long)efb_tex, width, height, (unsigned long)format);
+            }
+#endif
             pc_gx_draw_pending();
             glBindTexture(GL_TEXTURE_2D, efb_tex);
             pc_profiler_add_count_texture_bind();
@@ -699,7 +707,29 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
 #endif
 
     /* detect when emu64 reuses the same buffer with different data */
+#ifdef TARGET_3DS
+    /* Per-frame memo per unit: the game binds the same texture many times a frame. The hash is reused only
+     * within one frame, so a buffer rewritten between frames is still caught. */
+    static struct { unsigned int frame; void* ptr; int w, h; u32 fmt; u32 hash; } memo[8];
+    extern unsigned int n3ds_frame_id;
+    unsigned int frame_tag = n3ds_frame_id + 1; /* 0 = never filled */
+    u32 hash;
+    extern int g_n3ds_dbg; /* debug switch "nomemo" (bit 131072): A/B only */
+    if (!(g_n3ds_dbg & 131072) && memo[id].frame == frame_tag && memo[id].ptr == image_ptr && memo[id].w == width &&
+        memo[id].h == height && memo[id].fmt == format) {
+        hash = memo[id].hash;
+    } else {
+        hash = tex_content_hash(image_ptr, width, height, format);
+        memo[id].frame = frame_tag;
+        memo[id].ptr = image_ptr;
+        memo[id].w = width;
+        memo[id].h = height;
+        memo[id].fmt = format;
+        memo[id].hash = hash;
+    }
+#else
     u32 hash = tex_content_hash(image_ptr, width, height, format);
+#endif
 
     /* cache lookup */
     TexCacheEntry* cached = tex_cache_find(o[TEXOBJ_IMAGE_PTR], width, height, format, tlut_key,
@@ -759,7 +789,14 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
     /* cache miss */
     tex_cache_misses++;
     s_work_uploads++;
+#ifdef TARGET_3DS
+    { /* debug switch "nomissflush" (bit 524288 is "threads"; this uses 1048576): A/B for the crash */
+        extern int g_n3ds_dbg;
+        if (!(g_n3ds_dbg & 1048576)) pc_gx_draw_pending();
+    }
+#else
     pc_gx_draw_pending();
+#endif
 
     /* try texture pack replacement before decoding */
     if (pc_texture_pack_active()) {

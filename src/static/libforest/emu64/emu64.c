@@ -16,6 +16,8 @@
 #ifdef TARGET_PC
 #include "pc_platform.h"
 #ifdef TARGET_3DS
+extern unsigned int pc_emu64_dirty_count[64]; /* n3ds_calls.c */
+extern unsigned int pc_emu64_dirty_calls;
 /* n3ds_calls.c is C: these must have C linkage in this C++ file */
 extern "C" {
 int n3ds_dl_want(void);
@@ -3163,6 +3165,12 @@ void emu64::draw_rectangle(Gtexrect2* texrect) {
 }
 
 void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
+#ifdef TARGET_3DS
+    /* [DIRTY] count flags set on entry, per 600-frame window (printed by n3ds_emu64_report) */
+    pc_emu64_dirty_calls++;
+    for (int f = 0; f < NUM_DIRTY_FLAGS; f++)
+        if (this->dirty_flags[f]) pc_emu64_dirty_count[f]++;
+#endif
     if (aflags[AFLAGS_SET_DIRTY_FLAGS] != DIRTY_SET_NONE) {
         if ((int)aflags[AFLAGS_SET_DIRTY_FLAGS] == DIRTY_SET_ALL) {
             // memset(this->dirty_flags, TRUE, NUM_DIRTY_FLAGS);
@@ -3674,6 +3682,14 @@ void emu64::dl_G_SETTILE_DOLPHIN() {
     }
 #endif
 
+#ifdef TARGET_3DS
+    /* Same tile setting and image as the last call: nothing changes, so skip the tile rebuild (the dirty
+     * flag below rebuilds the texture object). The size and texture_info values come from now_setimg,
+     * so they are covered by the setimg2 compare. */
+    if (this->use_dolphin_settile[tile] && !memcmp(&this->settile_dolphin_cmds[tile], &decoded, sizeof(decoded)) &&
+        !memcmp(&this->setimg2_cmds[tile], &this->now_setimg.setimg2, sizeof(this->now_setimg.setimg2)))
+        return;
+#endif
     this->use_dolphin_settile[tile] = true;
     this->settile_dolphin_cmds[tile] = decoded;
     bzero(&this->settile_cmds[tile], sizeof(Gsettile));

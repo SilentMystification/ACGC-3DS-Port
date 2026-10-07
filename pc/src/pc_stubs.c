@@ -93,7 +93,18 @@ s32 osContStartReadData(void* mq) { (void)mq; return 0; }
 void osDestroyThread(void* t) { (void)t; }
 s32 osGetThreadId(void* thread) { (void)thread; return 0; }
 int osSetTimer(void* t, s64 countdown, s64 interval, void* mq, void* msg) {
-    (void)t; (void)countdown; (void)interval; (void)mq; (void)msg; return 0;
+    (void)t; (void)countdown; (void)interval;
+#ifdef TARGET_3DS
+    /* 3DS: no timer thread yet, so post the message now (the countdown is skipped). The initial menu
+     * waits for its fade-out step message; without it the menu thread never exits. */
+    {
+        extern int osSendMesg(void* mq, void* msg, int flags); /* pc_os.c */
+        if (mq) osSendMesg(mq, msg, 0);
+    }
+#else
+    (void)mq; (void)msg;
+#endif
+    return 0;
 }
 void osSyncPrintf(const char* fmt, ...) { (void)fmt; }
 void osWritebackDCache(void* vaddr, u32 nbytes) { (void)vaddr; (void)nbytes; }

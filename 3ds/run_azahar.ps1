@@ -20,10 +20,12 @@ param(
     [int]$Stall = 10,
     [switch]$Capture,
     [switch]$Gdb,
+    [switch]$Interactive, # a person plays: no timeout, no log-silence stop, settings windows allowed
     [string]$GdbScript = "",
     [string]$Debug = ""  # render debug switches for the game, see n3ds_tev.c (nofog nolight notex texonly logtev)
 )
 $ErrorActionPreference = "Stop"
+if ($Interactive) { $Timeout = [int]::MaxValue }
 $repo = Split-Path -Parent $PSScriptRoot
 $sd = "$env:APPDATA\Azahar\sdmc\3ds\AnimalCrossing"
 $cfg = "$env:APPDATA\Azahar\config\qt-config.ini"
@@ -125,13 +127,13 @@ try {
         if ($p.HasExited) { $reason = "Azahar exited"; break }
         if ($gdbProc -and $gdbProc.HasExited) { $reason = "gdb finished"; break }
         # Azahar shows a dialog on a guest CPU exception and the game stops: kill at once
-        if ([AzEnum]::Count([uint32]$p.Id) -gt 1) { Start-Sleep -Milliseconds 300; $reason = "Azahar dialog (exception or error), windows: $([AzEnum]::Titles)"; break }
-        if ((Read-Tail $emuLog) -match "Exception Type:") { Start-Sleep -Milliseconds 500; $reason = "emulator exception"; break }
+        if (-not $Interactive -and [AzEnum]::Count([uint32]$p.Id) -gt 1) { Start-Sleep -Seconds 4; $reason = "Azahar dialog (exception or error), windows: $([AzEnum]::Titles)"; break }
+        if ((Read-Tail $emuLog) -match "Exception Type:") { Start-Sleep -Seconds 4; $reason = "emulator exception"; break }
         if (-not (Test-Path $log)) { continue }
         # The game logs at least once per second; silence means a hang or an exception dialog
         $size = (Get-Item $log).Length
         if ($size -ne $lastSize) { $lastSize = $size; $lastGrow = Get-Date }
-        elseif (-not $Gdb -and ((Get-Date) - $lastGrow).TotalSeconds -gt $Stall) { $reason = "game log silent for $Stall s"; break }
+        elseif (-not $Gdb -and -not $Interactive -and ((Get-Date) - $lastGrow).TotalSeconds -gt $Stall) { $reason = "game log silent for $Stall s"; break }
         $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
         if (-not $text) { continue }
         if ($text -match "\[CRASH\]") { Start-Sleep -Seconds 1; $reason = "crash"; break }

@@ -303,7 +303,10 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
     u16 checksum;
     u8* others_ptr;
 
-    if (!pc_save_ready) return TRUE;
+    if (!pc_save_ready) {
+        OSReport("[PC] GCI save: skipped, save not ready\n");
+        return TRUE;
+    }
 
     pc_ensure_save_dirs();
 
@@ -722,6 +725,9 @@ int pc_save_reload(void) {
 
 int pc_save_check_and_load(void) {
     struct stat st;
+    /* mCD_InitGameStart_bg is never called, so pc_save_ready was never set and every save
+     * returned TRUE without writing. The save buffer is valid from here on. */
+    pc_save_ready = 1;
     {
         char cwd[512];
         if (getcwd(cwd, sizeof(cwd))) {
@@ -912,7 +918,7 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
     int slot = mCD_GetThisLandSlotNo();
     int result;
 
-
+    OSReport("[PC] mCD_SaveHome_bg: mode %d slot %d ready %d\n", param_1, slot, pc_save_ready);
     pc_save_pre_write_side_effects(param_1);
 
     if (slot == mCD_SLOT_B && l_card_b_gci_path[0] != '\0') {

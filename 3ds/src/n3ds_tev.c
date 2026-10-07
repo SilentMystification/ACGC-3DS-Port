@@ -41,7 +41,7 @@ int g_n3ds_dbg; /* also read by n3ds_gl.c (dumptex) */
 #define s_dbg g_n3ds_dbg
 
 static void read_debug_switches(void) {
-    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls", "nomvflush", "nogxvtx", "palflush", "palone", "dldump" };
+    static const char* const names[] = { "nofog", "nolight", "notex", "texonly", "logtev", "dumptex", "shots", "noscissor", "gputest", "locktest", "profile", "calls", "nomvflush", "nogxvtx", "palflush", "palone", "dldump", "nomemo", "pad", "threads", "nomissflush" };
     extern char g_n3ds_args[]; /* n3ds_sys.c: 3dslink arguments */
     char buf[512] = { 0 };
     FILE* f = fopen("debug3ds.txt", "r");
@@ -51,7 +51,7 @@ static void read_debug_switches(void) {
     }
     strncat(buf, g_n3ds_args, 255);
     if (!buf[0]) return;
-    for (int i = 0; i < 17; i++)
+    for (int i = 0; i < 21; i++)
         if (strstr(buf, names[i])) s_dbg |= 1 << i;
     printf("[3DS/TEV] debug switches: %s (0x%x)\n", buf, s_dbg);
 }
@@ -481,6 +481,18 @@ static void n3ds_tev_build(void) {
  * Azahar returns 0). Units 1 and 2 get this 8x8 white texture instead. */
 static C3D_Tex s_white;
 
+/* Called before deleted textures are freed: a unit still bound to a freed texture would read freed
+ * memory on the next draw. Unit 0 takes NULL, units 1 and 2 the white texture. The next texture
+ * flush binds the real textures again. */
+void n3ds_tex_units_detach(void) {
+    if (!s_white.data && C3D_TexInit(&s_white, 8, 8, GPU_L8)) {
+        memset(s_white.data, 0xFF, 64);
+        C3D_TexFlush(&s_white);
+    }
+    C3D_TexBind(0, NULL);
+    for (int s = 1; s < 3; s++) C3D_TexBind(s, s_white.data ? &s_white : NULL);
+}
+
 static void n3ds_bind_textures(void) {
     int ns = g_gx.num_tev_stages;
     if (!s_white.data && C3D_TexInit(&s_white, 8, 8, GPU_L8)) {
@@ -556,11 +568,40 @@ static int tex_mtx_slot(int id) {
     return -1;
 }
 
+/* Texgens (bit 0, bit 1) whose stage samples a screen capture (n3ds_gl_capture_screen) */
+static int s_rot_mask;
+static int rot_mask(void) {
+    extern int n3ds_gl_tex_rot(GLuint name);
+    int mask = 0;
+    for (int s = 0; s < g_gx.num_tev_stages && s < 3; s++) {
+        int map = g_gx.tev_stages[s].tex_map;
+        if (map >= 0 && map < 8 && n3ds_gl_tex_rot(g_gx.gl_textures[map]))
+            mask |= 1 << (pc_gx_tc_src_normalize(g_gx.tev_stages[s].tex_coord, s) == 1);
+    }
+    return mask;
+}
+
 static void n3ds_texgen(void) {
     static const float ident[8] = { 1, 0, 0, 0, 0, 1, 0, 0 };
+    s_rot_mask = rot_mask();
     for (int tg = 0; tg < 2; tg++) {
         int slot = tex_mtx_slot(g_gx.tex_gen_mtx[tg]);
         const float* rows = slot >= 0 ? &g_gx.tex_mtx[slot][0][0] : ident;
+        if (s_rot_mask & (1 << tg)) {
+            /* Capture texture: (s, t) of the upright screen image -> texel of the rotated target.
+             * u = (1 - t) * 240/256 (column = screen y, up), v = 1 - s * 400/512 (row = screen x;
+             * PICA t = 0 is the last row in memory). The input w is 1, so column 3 is the offset. */
+            const float a = 240.0f / 256.0f, c = 400.0f / 512.0f;
+            float r[8];
+            for (int i = 0; i < 4; i++) {
+                r[i] = -a * rows[4 + i];
+                r[4 + i] = -c * rows[i];
+            }
+            r[3] += a;
+            r[7] += 1.0f;
+            set_rows(tg ? s_u.texmtx1 : s_u.texmtx0, r, 2, 4);
+            continue;
+        }
         set_rows(tg ? s_u.texmtx1 : s_u.texmtx0, rows, 2, 4);
     }
     /* GX_TG_NRM = 1 */
@@ -660,7 +701,10 @@ void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n) {
 /* Called from pc_gx_flush_vertices with the dirty groups. MODELVIEW is not here: the palette carries it. */
 void n3ds_gx_upload(unsigned int dirty) {
     if (dirty & PC_GX_DIRTY_PROJECTION) n3ds_projection();
-    if (dirty & PC_GX_DIRTY_TEXGEN) n3ds_texgen();
+    /* a texture change can start or stop a capture draw: its texcoords live in the texgen matrix */
+    if ((dirty & PC_GX_DIRTY_TEXGEN) ||
+        ((dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) && rot_mask() != s_rot_mask))
+        n3ds_texgen();
     if (dirty & PC_GX_DIRTY_LIGHTING) n3ds_lighting();
     if (dirty & (PC_GX_DIRTY_FOG | PC_GX_DIRTY_PROJECTION)) n3ds_fog();
     if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST |
