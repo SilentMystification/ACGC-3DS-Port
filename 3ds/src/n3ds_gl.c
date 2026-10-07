@@ -40,7 +40,7 @@ typedef struct N3DSTex {
     struct N3DSTex* next_free;
 } N3DSTex;
 
-/* GPU vertex: the PCGXVertex fields the shader reads (96 -> 36 bytes) */
+/* GPU vertex, 40 bytes. PCGXVertex has the same layout on 3DS (pc_gx_internal.h). */
 typedef struct {
     float pos[3];
     float nrm[3];
@@ -54,6 +54,8 @@ static int s_in_frame;
 static N3DSVtx* s_arena;
 static u32 s_arena_used;
 static N3DSVtx* s_draw_vtx; /* last uploaded GX batch, NULL if none */
+static const N3DSVtx* s_buf_base; /* vertex buffer base the GPU has now (draw_ready) */
+static void vertex_tail_set(u32 at, const PCGXVertex* src, int keep);
 static u16* s_quad_idx;
 static GLuint s_program;
 static N3DSTex* s_bound_tex;
@@ -316,6 +318,9 @@ static void ensure_frame(void) {
     s_in_frame = 1;
     s_arena_used = 0;
     s_draw_vtx = NULL;
+    s_buf_base = NULL; /* the arena restarts: set the buffer base again on the first draw */
+    /* the GPU is done with the arena: pc_gx's tail (and verts it already wrote) goes back to the start */
+    vertex_tail_set(0, g_gx.vertex_buffer, g_gx.current_vertex_idx);
     free_deleted_textures();
     apply_viewport(); /* FrameDrawOn reset the viewport */
     apply_scissor();
@@ -398,6 +403,11 @@ GLuint n3ds_gl_capture_screen(void) {
     return (GLuint)(uintptr_t)t;
 }
 
+int n3ds_gl_tex_valid(GLuint name) {
+    N3DSTex* t = (N3DSTex*)(uintptr_t)name;
+    return t && t->valid;
+}
+
 int n3ds_gl_tex_rot(GLuint name) {
     N3DSTex* t = (N3DSTex*)(uintptr_t)name;
     return t && t->valid && t->rot;
@@ -455,7 +465,8 @@ static void perf_frame(void) {
         if (ms > 20.0f) stutters++;
     }
     last = now;
-    if (++n < 30) return;
+    ++n;
+    if (win_ticks < SYSCLOCK_ARM11) return; /* windows of 1 s, whatever the frame rate */
 
     float secs = (float)win_ticks / (float)SYSCLOCK_ARM11;
     float fps = secs > 0.0f ? n / secs : 0.0f;
@@ -463,7 +474,7 @@ static void perf_frame(void) {
     static int status_traced;
     if (!status_traced) printf("[TRACE] first status update\n");
     n3ds_status(0, "FPS %4.1f  avg %4.1fms  worst %4.1fms", fps, secs * 1000.0f / n, worst);
-    n3ds_status(1, "stutter(>20ms) %lu/30  draws %lu  vtx %lu", (unsigned long)stutters,
+    n3ds_status(1, "stutter(>20ms) %lu/%lu  draws %lu  vtx %lu", (unsigned long)stutters, (unsigned long)n,
                 (unsigned long)(s_stat_draws / n), (unsigned long)(s_stat_verts / n));
     n3ds_status(2, "heap %luK  linear %luK  EFB %lu", (unsigned long)heap, (unsigned long)lin,
                 (unsigned long)s_stat_copies);
@@ -477,20 +488,27 @@ static void perf_frame(void) {
     extern void pc_gx_texture_work_stats(u32* lookups, u32* scan_total, u32* uploads);
     u32 tex_lookups, tex_scan, tex_uploads;
     pc_gx_texture_work_stats(&tex_lookups, &tex_scan, &tex_uploads);
-    printf("[WORK] vtx_bytes/f %lu  draws/f %lu  tex_lookups %lu scan_steps %lu (%.1f/lookup) uploads %lu\n",
+    printf("[WORK] vtx_bytes/f %lu  draws/f %lu  tex_lookups/f %lu scan_steps/f %lu (%.1f/lookup) uploads %lu/%luf\n",
            (unsigned long)(s_stat_verts * sizeof(N3DSVtx) / (n ? n : 1)), (unsigned long)(s_stat_draws / n),
-           (unsigned long)tex_lookups, (unsigned long)tex_scan,
-           tex_lookups ? (double)tex_scan / tex_lookups : 0.0, (unsigned long)tex_uploads);
+           (unsigned long)(tex_lookups / n), (unsigned long)(tex_scan / n),
+           tex_lookups ? (double)tex_scan / tex_lookups : 0.0, (unsigned long)tex_uploads, (unsigned long)n);
+    {   /* emu64 N64 -> GC conversions: .data results are kept, bss results are redone every frame */
+        extern unsigned int pc_emu64_texconv_n[2], pc_emu64_texconv_bytes[2];
+        printf("[TEXCONV] per frame: data %lu (%lu B)  bss %lu (%lu B)\n",
+               (unsigned long)(pc_emu64_texconv_n[0] / n), (unsigned long)(pc_emu64_texconv_bytes[0] / n),
+               (unsigned long)(pc_emu64_texconv_n[1] / n), (unsigned long)(pc_emu64_texconv_bytes[1] / n));
+        pc_emu64_texconv_n[0] = pc_emu64_texconv_n[1] = pc_emu64_texconv_bytes[0] = pc_emu64_texconv_bytes[1] = 0;
+    }
 
-    /* first lines early (frames 60 and 180), so a hang in the first seconds still leaves numbers */
-    static u32 total_frames;
+    /* first lines early (windows 2 and 6), so a hang in the first seconds still leaves numbers */
+    static u32 total_frames, windows;
     total_frames += n;
-    if (total_frames == 60 || total_frames == 180)
+    if (++windows == 2 || windows == 6)
         printf("[PERF] frame %lu: %.1f fps, worst %.1fms, %lu draws %lu vtx, GPU draw %.1fms proc %.1fms, heap %luK linear %luK\n",
                (unsigned long)total_frames, fps, worst, (unsigned long)(s_stat_draws / n),
                (unsigned long)(s_stat_verts / n), C3D_GetDrawingTime(), C3D_GetProcessingTime(),
                (unsigned long)heap, (unsigned long)lin);
-    if (sum_frames >= 600) {
+    if (sum_ticks >= 20ULL * SYSCLOCK_ARM11) { /* long summary every 20 s */
         extern int g_n3ds_dbg; /* n3ds_tev.c; 2048 = calls */
         if (g_n3ds_dbg & 2048) { extern void n3ds_calls_report(void); extern void n3ds_emu64_report(void); n3ds_calls_report(); n3ds_emu64_report(); }
         float s = (float)sum_ticks / (float)SYSCLOCK_ARM11;
@@ -501,8 +519,8 @@ static void perf_frame(void) {
             extern unsigned long long n3ds_gpu_wait_ticks, n3ds_frame_end_ticks;
             double ms_wait = (double)n3ds_gpu_wait_ticks / (double)sum_frames / 268123.0;
             double ms_end = (double)n3ds_frame_end_ticks / (double)sum_frames / 268123.0;
-            printf("[FRAME] 600f: gpu wait %.2f ms/frame, frame end %.2f ms/frame, wall %.2f ms/frame\n",
-                   ms_wait, ms_end, s * 1000.0 / sum_frames);
+            printf("[FRAME] %.0fs: gpu wait %.2f ms/frame, frame end %.2f ms/frame, wall %.2f ms/frame\n",
+                   s, ms_wait, ms_end, s * 1000.0 / sum_frames);
             n3ds_gpu_wait_ticks = n3ds_frame_end_ticks = 0;
         }
         sum_frames = sum_stutters = sum_draws = sum_verts = 0;
@@ -557,35 +575,58 @@ static void gl_buffer_data(GLenum target, GLsizeiptr size, const void* data, GLe
     }
     if (target != GL_ARRAY_BUFFER || data != g_gx.vertex_buffer) return;
 
-    static int warned;
+    _Static_assert(sizeof(PCGXVertex) == sizeof(N3DSVtx) && offsetof(PCGXVertex, pal) == offsetof(N3DSVtx, pal) &&
+                       offsetof(PCGXVertex, texcoord) == offsetof(N3DSVtx, tc) &&
+                       offsetof(PCGXVertex, color0) == offsetof(N3DSVtx, clr),
+                   "PCGXVertex must match N3DSVtx (pc_gx_internal.h)");
     ensure_frame();
+    /* pc_gx wrote the run at the arena tail (g_gx.vertex_buffer): it is used in place, no copy */
     u32 count = (u32)size / sizeof(PCGXVertex);
-    s_draw_vtx = NULL;
-    s_arena_used = (s_arena_used + 3) & ~3u; /* 4 x 36 = 144: each batch starts 16-byte aligned */
-    if ((s_arena_used + count) * sizeof(N3DSVtx) > N3DS_VTX_ARENA) {
-        if (!warned) { warned = 1; printf("[3DS/GL] vertex arena full, draws dropped\n"); }
-        return;
-    }
-    const PCGXVertex* src = (const PCGXVertex*)data;
-    N3DSVtx* dst = s_arena + s_arena_used;
-    for (u32 i = 0; i < count; i++) {
-        memcpy(dst[i].pos, src[i].position, sizeof(dst[i].pos));
-        memcpy(dst[i].nrm, src[i].normal, sizeof(dst[i].nrm));
-        memcpy(dst[i].clr, src[i].color0, sizeof(dst[i].clr));
-        memcpy(dst[i].tc, src[i].texcoord[0], sizeof(dst[i].tc));
-        dst[i].pal = src[i].pal;
-    }
-    s_draw_vtx = dst;
-    s_arena_used += count;
+    s_draw_vtx = (N3DSVtx*)data;
+    s_arena_used = (u32)(s_draw_vtx - s_arena) + count;
     s_stat_verts += count;
 }
 
-static int draw_ready(void) {
+#define ARENA_VERTS ((u32)(N3DS_VTX_ARENA / sizeof(N3DSVtx)))
+
+/* Point pc_gx's vertex buffer at arena vertex `at`, rounded up to 4 (4 x 40 = 160, so each run
+ * starts 16-byte aligned), and move the `keep` verts already written at `src` there. */
+static void vertex_tail_set(u32 at, const PCGXVertex* src, int keep) {
+    static int warned;
+    at = (at + 3) & ~3u;
+    if (at + (u32)keep + 64 > ARENA_VERTS) { /* full: the rest of this frame's geometry is dropped */
+        if (!warned) { warned = 1; printf("[3DS/GL] vertex arena full, draws dropped\n"); }
+        at = ARENA_VERTS - 64;
+        keep = 0;
+    }
+    PCGXVertex* dst = (PCGXVertex*)(s_arena + at);
+    if (keep > 0 && src != dst) memmove(dst, src, (size_t)keep * sizeof(PCGXVertex));
+    u32 cap = ARENA_VERTS - at;
+    g_gx.vertex_buffer = dst;
+    g_gx.vertex_cap = (int)(cap < PC_GX_MAX_VERTS ? cap : PC_GX_MAX_VERTS);
+    g_gx.current_vertex_idx = keep;
+}
+
+/* pc_gx_init: g_gx was cleared */
+void n3ds_gx_vertex_tail_init(void) { vertex_tail_set(s_arena_used, NULL, 0); }
+
+/* pc_gx drew the first `count` verts at the tail: the verts written after them become the new tail */
+void n3ds_gx_vertices_drawn(int count) {
+    vertex_tail_set(s_arena_used, g_gx.vertex_buffer + count, g_gx.current_vertex_idx - count);
+}
+
+/* Vertex buffer base the GPU has now. C3D_GetBufInfo marks the buffer config dirty, and citro3d
+ * then sends it again with the draw, so it is set only when the base changes: array draws use the
+ * arena start plus an offset (once per frame); indexed quads need the batch start (no base vertex). */
+static int draw_ready(const N3DSVtx* base) {
     if (s_program != N3DS_GX_PROG || !s_draw_vtx || s_vp_empty || s_sc_empty) return 0;
     if (gs.cull && gs.cull_face == GL_FRONT_AND_BACK) return 0;
-    C3D_BufInfo* bi = C3D_GetBufInfo();
-    BufInfo_Init(bi);
-    BufInfo_Add(bi, s_draw_vtx, sizeof(N3DSVtx), 5, 0x43210);
+    if (base != s_buf_base) {
+        C3D_BufInfo* bi = C3D_GetBufInfo();
+        BufInfo_Init(bi);
+        BufInfo_Add(bi, base, sizeof(N3DSVtx), 5, 0x43210);
+        s_buf_base = base;
+    }
     s_stat_draws++;
     return 1;
 }
@@ -601,16 +642,16 @@ static void gl_draw_arrays(GLenum mode, GLint first, GLsizei count) {
             if (!warned) { warned = 1; printf("[3DS/GL] line/point primitives skipped\n"); }
             return;
     }
-    if (count >= 3 && draw_ready()) {
+    if (count >= 3 && draw_ready(s_arena)) {
         s_step = "draw (DrawArrays)";
         record_draw((int)prim >> 8, first, count);
-        C3D_DrawArrays(prim, first, count);
+        C3D_DrawArrays(prim, (int)(s_draw_vtx - s_arena) + first, count);
     }
 }
 
 static void gl_draw_elements(GLenum mode, GLsizei count, GLenum type, const void* offset) {
     (void)type;
-    if (mode == GL_TRIANGLES && count >= 3 && s_quad_idx && draw_ready())
+    if (mode == GL_TRIANGLES && count >= 3 && s_quad_idx && draw_ready(s_draw_vtx))
     {
         s_step = "draw (DrawElements)";
         record_draw(4, 0, count); /* 4 = indexed quads */

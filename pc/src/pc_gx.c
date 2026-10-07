@@ -261,7 +261,7 @@ static void pc_gx_buffer_data_profiled(GLenum target, GLsizeiptr size, const voi
 /* Commit pending vertex + flush batch to GL. Used by GXBegin/GXEnd/GXCopyDisp/etc. */
 static void pc_gx_commit_pending_and_flush(void) {
     if (!g_gx.in_begin) return;
-    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
+    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_VTX_CAP) {
         g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
         g_gx.current_vertex_idx++;
         g_gx.vertex_pending = 0;
@@ -305,15 +305,23 @@ static int s_pal_n;
 static GLuint s_batch_tex[8]; /* GL textures the pending batch draws with (snapshot at upload) */
 static float s_grp_pal; /* palette offset for the group being submitted */
 extern void n3ds_gx_upload_palette(const float* pos, const float* nrm, int n);
+/* Fast path for pal_for_group: GXBegin runs once per 1-2 triangles, and the matrix pair seldom
+ * changes between groups. group_seq[1] (MODELVIEW) moves on every real matrix or current-matrix
+ * change; s_pal_gen moves on every palette reset. Both unchanged: s_grp_pal is still right. */
+static unsigned int s_pal_gen, s_pal_seen_seq = 0xFFFFFFFFu, s_pal_seen_gen = 0xFFFFFFFFu;
+
 static void pal_for_group(void) {
     extern int g_n3ds_dbg;
     if (g_n3ds_dbg & 16384) pc_gx_draw_pending(); /* debug switch "palflush": one draw per group */
     /* g_n3ds_dbg is read again below for "palone" */
+    if (g_gx.group_seq[1] == s_pal_seen_seq && s_pal_gen == s_pal_seen_gen && !(g_n3ds_dbg & 16384)) return;
+    s_pal_seen_seq = g_gx.group_seq[1];
     const float* p = &g_gx.pos_mtx[g_gx.current_mtx][0][0];
     const float* n = &g_gx.nrm_mtx[g_gx.current_mtx][0][0];
     for (int k = 0; k < s_pal_n; k++) {
         if (!memcmp(s_pal_pos[k], p, sizeof(s_pal_pos[k])) && !memcmp(s_pal_nrm[k], n, sizeof(s_pal_nrm[k]))) {
             s_grp_pal = (float)(3 * k);
+            s_pal_seen_gen = s_pal_gen;
             return;
         }
     }
@@ -321,16 +329,22 @@ static void pal_for_group(void) {
     if (s_pal_n >= cap) { /* palette full: draw the batch, then open a new palette (no group references it now) */
         pc_gx_draw_pending();
         s_pal_n = 0;
+        s_pal_gen++;
     }
     int k = s_pal_n++;
     memcpy(s_pal_pos[k], p, sizeof(s_pal_pos[k]));
     memcpy(s_pal_nrm[k], n, sizeof(s_pal_nrm[k]));
     s_grp_pal = (float)(3 * k);
+    s_pal_seen_gen = s_pal_gen;
 }
 #endif
 
 void pc_gx_init(void) {
     memset(&g_gx, 0, sizeof(g_gx));
+#ifdef TARGET_3DS
+    extern void n3ds_gx_vertex_tail_init(void);
+    n3ds_gx_vertex_tail_init();
+#endif
 
     g_gx.projection_type = GX_PERSPECTIVE;
     g_gx.num_tev_stages = 1;
@@ -486,7 +500,7 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     /* Auto-flush previous batch if GXEnd was omitted (normal on real HW) */
     pc_gx_commit_pending_and_flush();
 
-    if (g_gx.pending_verts > 0 && g_gx.pending_verts + (int)nverts > PC_GX_MAX_VERTS)
+    if (g_gx.pending_verts > 0 && g_gx.pending_verts + (int)nverts > PC_GX_VTX_CAP)
         pc_gx_draw_pending();
 #ifdef TARGET_3DS
     pal_for_group(); /* the group's matrix pair gets a palette slot, ends the batch if the palette is full */
@@ -511,7 +525,7 @@ void GXEnd(void) {
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
     /* Deferred commit: position call commits the previous vertex */
-    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
+    if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_VTX_CAP) {
         g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
         g_gx.current_vertex_idx++;
     }
@@ -756,7 +770,11 @@ void pc_gx_draw_pending(void) {
 #ifdef TARGET_3DS
     /* the palette goes to the shader before the draw. It is not reset here: a group that is not drawn yet
      * can still reference its slots. pal_for_group resets it when it opens a new batch. */
-    n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
+    {
+        Uint64 pal_start = pc_profiler_begin_timer(); /* counted with the other uniform uploads */
+        n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
+        pc_profiler_add_time(PC_PROF_TIMER_UNIFORM_UPLOAD, pal_start);
+    }
 #endif
 
     glBindVertexArray(g_gx.vao);
@@ -777,6 +795,13 @@ void pc_gx_draw_pending(void) {
     pc_gx_draw_call_count++;
     pc_profiler_add_time(PC_PROF_TIMER_DRAW_SUBMIT, draw_start);
 
+#ifdef TARGET_3DS
+    /* the drawn run stays in the arena; the tail (with the verts committed after the run) moves past it */
+    extern void n3ds_gx_vertices_drawn(int count);
+    n3ds_gx_vertices_drawn(count);
+    g_gx.pending_verts = 0;
+    return;
+#endif
     /* Shift verts committed after the run down to the buffer start */
     int extra = g_gx.current_vertex_idx - count;
     if (extra > 0) {
@@ -824,7 +849,8 @@ void pc_gx_flush_vertices(void) {
     /* State is changing: draw the deferred run while GL state still matches it */
 #ifdef TARGET_3DS
     /* diagnostic: why a draw is forced, and which dirty groups caused it (n3ds_calls.c [DRAW]) */
-    if (g_gx.pending_verts > 0) {
+    extern int g_n3ds_dbg;
+    if (g_gx.pending_verts > 0 && (g_n3ds_dbg & 2048)) { /* switch "calls" */
         int reason = g_gx.dirty ? 1 : (!deferrable ? 2 : (prim != g_gx.pending_prim ? 3 : (shader != g_gx.current_shader ? 4 : 0)));
         pc_gx_flush_reason[reason]++;
         for (int b = 0; b < 32; b++)
@@ -1242,6 +1268,7 @@ void pc_gx_flush_vertices(void) {
     /* this draw is not deferred: upload its palette now, then the next batch starts a new one */
     n3ds_gx_upload_palette(&s_pal_pos[0][0], &s_pal_nrm[0][0], s_pal_n);
     s_pal_n = 0;
+    s_pal_gen++;
 #endif
     Uint64 draw_start = pc_profiler_begin_timer();
     if (prim == GX_QUADS) {
@@ -1258,7 +1285,12 @@ void pc_gx_flush_vertices(void) {
     pc_gx_draw_call_count++;
     pc_profiler_add_time(PC_PROF_TIMER_DRAW_SUBMIT, draw_start);
 
+#ifdef TARGET_3DS
+    extern void n3ds_gx_vertices_drawn(int count);
+    n3ds_gx_vertices_drawn(count); /* sets current_vertex_idx to the verts after the run (none here) */
+#else
     g_gx.current_vertex_idx = 0;
+#endif
     pc_profiler_add_time(PC_PROF_TIMER_GX_FLUSH, flush_start);
 }
 
@@ -1353,7 +1385,8 @@ void GXLoadPosMtxImm(const void* mtx, u32 id) {
     int slot = id / 3;
     if (slot >= 10) return;
 #ifdef TARGET_3DS
-    {   /* [USE] every load counts toward distinct position matrices per frame (hash of the 12 words) */
+    extern int g_n3ds_dbg;
+    if (g_n3ds_dbg & 2048) {   /* switch "calls": [USE] distinct position matrices per frame (hash of the 12 words) */
         extern void n3ds_note_use(int kind, unsigned int key);
         const u32* w = (const u32*)mtx;
         u32 h = 0;

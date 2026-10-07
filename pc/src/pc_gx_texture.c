@@ -38,6 +38,7 @@ typedef struct {
     u32 wrap_t;
     u32 min_filter;
     u8 external;     /* owned by texture pack, don't delete on eviction */
+    u32 last_use;    /* 3DS: n3ds_frame_id of the last bind (age-based eviction) */
 } TexCacheEntry;
 
 /* Bits-per-pixel for each GC texture format (8 for unknown as safe default) */
@@ -145,6 +146,42 @@ static void tex_hash_rebuild(void) {
     for (int i = 0; i < tex_cache_count; i++) tex_hash_add(i);
 }
 
+/* Removes the entries that match drop() and are not bound on a unit, then compacts the
+ * cache and rebuilds the index. Returns the number removed. */
+static int tex_cache_remove_if(int (*drop)(const TexCacheEntry* e, u32 arg), u32 arg) {
+    int out = 0, removed = 0;
+    for (int i = 0; i < tex_cache_count; i++) {
+        TexCacheEntry* e = &tex_cache[i];
+        int bound = 0;
+        for (int s = 0; s < 8 && !bound; s++) bound = e->gl_tex && g_gx.gl_textures[s] == e->gl_tex;
+        if (!bound && drop(e, arg)) {
+            if (e->gl_tex && !e->external) glDeleteTextures(1, &e->gl_tex);
+            removed++;
+            continue;
+        }
+        if (out != i) tex_cache[out] = *e;
+        out++;
+    }
+    if (removed) {
+        tex_cache_count = out;
+        tex_hash_rebuild();
+    }
+    return removed;
+}
+
+#ifdef TARGET_3DS
+extern unsigned int n3ds_frame_id;
+static int drop_older(const TexCacheEntry* e, u32 min_age) { return n3ds_frame_id - e->last_use >= min_age; }
+#endif
+static u32 s_range_end;
+static int drop_in_range(const TexCacheEntry* e, u32 start) { return e->data_ptr >= start && e->data_ptr < s_range_end; }
+
+/* emu64 reset a texture conversion buffer: its addresses now hold other textures */
+void pc_gx_texture_invalidate_range(const void* start, const void* end) {
+    s_range_end = (u32)(uintptr_t)end;
+    tex_cache_remove_if(drop_in_range, (u32)(uintptr_t)start);
+}
+
 static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tlut_name,
                                      u32 tlut_ptr, u32 tlut_hash, u32 data_hash) {
     tex_cache_scan_steps = 0;
@@ -162,6 +199,9 @@ static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tl
 
 static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 tlut_name,
                                        u32 tlut_ptr, u32 tlut_hash, u32 data_hash, GLuint gl_tex) {
+#ifdef TARGET_3DS
+    if (tex_cache_count >= TEX_CACHE_SIZE) tex_cache_remove_if(drop_older, 60); /* not bound for 60 frames */
+#endif
     if (tex_cache_count >= TEX_CACHE_SIZE) {
         /* evict oldest half */
         int half = TEX_CACHE_SIZE / 2;
@@ -194,6 +234,9 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
     e->wrap_t = 0xFFFFFFFF;
     e->min_filter = 0xFFFFFFFF;
     e->external = 0;
+#ifdef TARGET_3DS
+    e->last_use = n3ds_frame_id;
+#endif
     tex_hash_add(idx);
     return e;
 }
@@ -668,10 +711,32 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
         int tlut_name = (int)o[TEXOBJ_TLUT_NAME];
         if (tlut_name >= 0 && tlut_name < 16 && g_gx.tlut[tlut_name].data) {
             tlut_ptr_key = (u32)(uintptr_t)g_gx.tlut[tlut_name].data;
+#ifdef TARGET_3DS
+            /* Per-frame memo per TLUT slot, as for the texture hash: within one frame emu64 puts
+             * each conversion at a new address, so (frame, data, format, count) identifies the content. */
+            static struct { unsigned int frame; const void* data; int fmt, n, be; u32 hash; } tmemo[16];
+            extern unsigned int n3ds_frame_id;
+            typeof(tmemo[0])* m = &tmemo[tlut_name];
+            if (m->frame == n3ds_frame_id + 1 && m->data == g_gx.tlut[tlut_name].data &&
+                m->fmt == (int)g_gx.tlut[tlut_name].format && m->n == (int)g_gx.tlut[tlut_name].n_entries &&
+                m->be == (int)g_gx.tlut[tlut_name].is_be) {
+                tlut_hash_key = m->hash;
+            } else {
+                tlut_hash_key = tlut_content_hash(g_gx.tlut[tlut_name].data, g_gx.tlut[tlut_name].format,
+                                                  g_gx.tlut[tlut_name].n_entries, g_gx.tlut[tlut_name].is_be);
+                m->frame = n3ds_frame_id + 1;
+                m->data = g_gx.tlut[tlut_name].data;
+                m->fmt = (int)g_gx.tlut[tlut_name].format;
+                m->n = (int)g_gx.tlut[tlut_name].n_entries;
+                m->be = (int)g_gx.tlut[tlut_name].is_be;
+                m->hash = tlut_hash_key;
+            }
+#else
             tlut_hash_key = tlut_content_hash(g_gx.tlut[tlut_name].data,
                                               g_gx.tlut[tlut_name].format,
                                               g_gx.tlut[tlut_name].n_entries,
                                               g_gx.tlut[tlut_name].is_be);
+#endif
         }
     }
 
@@ -738,6 +803,9 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
     s_work_scan_total += (u32)tex_cache_scan_steps;
     if (cached) {
         tex_cache_hits++;
+#ifdef TARGET_3DS
+        cached->last_use = n3ds_frame_id;
+#endif
         GLuint tex = cached->gl_tex;
         int slot_changed = g_gx.gl_textures[id] != tex ||
             g_gx.tex_obj_w[id] != width ||
@@ -850,6 +918,12 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
         }
     }
 
+#ifdef TARGET_3DS
+    { /* keep a linear-memory reserve: drop textures not bound for 120 frames (freed next frame) */
+        extern u32 linearSpaceFree(void);
+        if (linearSpaceFree() < 1024 * 1024) tex_cache_remove_if(drop_older, 120);
+    }
+#endif
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -889,6 +963,19 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
     }
 
+#ifdef TARGET_3DS
+    {   /* out of texture memory: free old textures and cache nothing, so the next bind uploads again */
+        extern int n3ds_gl_tex_valid(GLuint name);
+        if (!n3ds_gl_tex_valid(tex)) {
+            tex_cache_remove_if(drop_older, 2);
+            glDeleteTextures(1, &tex);
+            o[TEXOBJ_GL_TEX] = 0;
+            g_gx.gl_textures[id] = 0;
+            DIRTY(PC_GX_DIRTY_TEXTURES);
+            return;
+        }
+    }
+#endif
     {
         GLenum gl_filter = filter_mode ? GL_LINEAR : GL_NEAREST;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter);
@@ -920,6 +1007,7 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
 }
 
 void GXLoadTexObj(void* obj, u32 id) {
+    pc_gx_flush_if_begin_complete(); /* outside the texobj timer: it can draw the pending batch */
     Uint64 prof_start = pc_profiler_begin_timer();
     pc_gx_load_tex_obj_impl(obj, id);
     pc_profiler_add_time(PC_PROF_TIMER_TEXOBJ, prof_start);

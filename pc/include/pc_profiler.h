@@ -29,6 +29,10 @@ typedef enum {
     PC_PROF_TIMER_AUDIO_FRAME,
     PC_PROF_TIMER_JW_FRAME,
     PC_PROF_TIMER_EFB_COPY,
+    PC_PROF_TIMER_VTX_LOAD, /* emu64 G_VTX: vertex load and CPU transform */
+    PC_PROF_TIMER_TEXCONV,  /* emu64 N64 -> GC texture and TLUT conversions */
+    PC_PROF_TIMER_TRI_CMDS, /* emu64 triangle commands: vertex emit through GX (includes their gx_flush) */
+    PC_PROF_TIMER_DIRTY_CHECK, /* emu64 dirty_check: state setup before a draw (inside tri_cmds) */
     PC_PROF_TIMER_COUNT
 } PCProfilerTimer;
 

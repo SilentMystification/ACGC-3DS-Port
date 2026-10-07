@@ -6,7 +6,8 @@
 # The 3DS address comes from $N3DS_IP, else from a UDP broadcast (the same probe 3dslink uses).
 # The game runs a log server on TCP port 17492 when netloaded (3ds/src/n3ds_sys.c). This PC
 # connects to it, the same direction as the upload, so a PC firewall or VPN does not block it.
-# Output: build3ds/hw_live_log.txt (also printed). Run it in the background for long runs.
+# Output: build3ds/hw_live_log_<last octet of the IP>.txt (also printed), one file per console, so two
+# consoles can be captured at the same time. Run it in the background for long runs.
 set -e
 cd "$(dirname "$0")/.."
 secs=60
@@ -35,5 +36,6 @@ MSYS_NO_PATHCONV=1 timeout 120 docker run --rm -v "$(pwd)/build3ds:/out:ro" devk
     stdbuf -oL /opt/devkitpro/tools/bin/3dslink -a "$ip" /out/ac_3ds.3dsx -- --verbose "$@"
 
 echo "reading the game's log from $ip:17492 for $secs s"
-py -3 -u 3ds/tools/livelog.py "$ip" "$secs" build3ds/hw_live_log.txt
-echo "--- log saved to build3ds/hw_live_log.txt"
+log="build3ds/hw_live_log_${ip##*.}.txt"
+py -3 -u 3ds/tools/livelog.py "$ip" "$secs" "$log"
+echo "--- log saved to $log"

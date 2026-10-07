@@ -39,7 +39,8 @@ static const char* s_timer_names[PC_PROF_TIMER_COUNT] = {
     "gx_begin", "dl_replay", "gx_flush", "buf_upload", "uniforms", "uniform_lookup",
     "tex_bind", "shader_switch", "gl_state", "draw_submit", "poll", "swap", "pace",
     "game_logic", "emu64_task", "texobj",
-    "draw_finish", "audio_frame", "jw_frame", "efb_copy"
+    "draw_finish", "audio_frame", "jw_frame", "efb_copy",
+    "vtx_load", "texconv", "tri_cmds", "dirty_check"
 };
 
 static const char* s_dirty_names[16] = {
@@ -63,7 +64,11 @@ void pc_profiler_begin_frame(void) {
         pc_profiler_accum_frame();
         s_frames++;
         s_frame_marked = 0;
+#ifdef TARGET_3DS
+        if (s_accum.frame_ms >= 1000.0) { /* windows of 1 s, whatever the frame rate */
+#else
         if (s_frames >= g_pc_profile_interval) {
+#endif
             pc_profiler_print_report();
             memset(&s_accum, 0, sizeof(s_accum));
             memset(&s_peak, 0, sizeof(s_peak));

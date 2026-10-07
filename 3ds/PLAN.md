@@ -176,6 +176,64 @@ Running list. Add items as they come up. Tick them off with the measurement that
 - [ ] **Frame rate in game.** Hardware: 10 to 18 fps in game, 568 stutters per 600 frames in one window. Target 60 fps. Bigger problem than boot time.
 - [ ] **Remove the emu64 opcode timing.** The `calls`-switch timing adds two tick reads per opcode and inflates absolute ms. Remove once the step 3 target is chosen.
 
+### Frame-time work (started 2026-10-07)
+
+Hardware baseline, O3DS, town, build 01:26 (`build3ds/hw_0126_log.txt`): 298 draws, 10,296 vertices,
+96.3 ms/frame. emu64_task 86.6 ms: tri_cmds 68.0 (gx_flush 30.4, dirty_check 17.6 incl. texobj 7.2,
+vertex emit about 20), vtx_load 4.5, other emu64 commands about 14. game_logic 6.9. GPU wait 0.9 ms:
+the CPU limits the frame rate, not the GPU. `debug3ds.txt` with `profile calls` turns on `[PROFILE]`,
+`[TEXCONV]`, `[DRAW]`, `[USE]`, `[CALLS]`.
+
+N3DS baseline, build 01:48 (`build3ds/hw_n3ds_0148_log.txt`, 192.168.1.223, speedup on): 60 fps (vsync cap)
+up to about 5,100 vertices/frame; 52–57 fps (17.5–19.2 ms) at 6,800–7,600 vertices, GPU wait 1.1–1.6 ms there.
+About 3.5× the O3DS at the same load. No `[PROFILE]` yet (no `debug3ds.txt` on that console).
+
+Done (measured):
+- [x] **TEV rebuild on a texture-only change.** The combiners depend only on which stages have a texture.
+  Azahar title: uniforms 1.52 → 0.55 ms. Hardware: about 46 → 17 µs per draw.
+- [x] **Vertex struct 100 → 40 bytes on 3DS, same layout as `N3DSVtx`.** Arena upload is one memcpy.
+- [x] **Vertex buffer base set once per frame**, draws use a `first` offset (indexed quads keep a per-batch base).
+  With the item above: hardware about 10.7 → 9.4 µs per vertex (01:20 → 01:26).
+- [x] **TLUT hash memo** per frame and TLUT slot (was a byte loop over up to 512 bytes per CI bind).
+- [x] **Hot-path diagnostics behind the `calls` switch** (`[USE]` matrix hash and scans, `[DRAW]` dirty-bit loop).
+- [x] **Texture cache memory.** Age-based eviction (60 frames), 1 MB linear reserve, failed uploads not cached,
+  emu64 `.data` conversion buffer reset clears its cache range. Before: linear memory fell 1.76 MB in 4 min.
+- [x] **Texture-unit bind cache.** `C3D_TexBind` only on a real change (pointer, data, wrap/filter). Hardware
+  draw_submit stayed about 36 µs per draw, so citro3d's own per-draw cost dominates.
+- [x] **Perf windows by time.** Overlay, `[WORK]`, `[TEXCONV]`, `[PROFILE]` every 1 s; `[PERF]`/`[FRAME]`/`[CALLS]` every 20 s.
+- [x] **Checked, no change needed: emu64 bss texture reconversion.** emu64 resets its bss conversion buffer every
+  frame, but `[TEXCONV]` shows 0 bss conversions per frame in town on hardware.
+
+- [x] **Zero-copy vertex arena (01:40).** `g_gx.vertex_buffer` points at the arena tail; `GXPosition3f32` writes
+  where the GPU reads. Hardware, about 10.2k vertices and 295 draws (01:26 → 01:40): frame 96.1 → 88.2 ms,
+  gx_flush 30.5 → 24.4, buf_upload 4.13 → 0.80, draw_submit 11.5 → 9.9 (with the texture-unit bind cache).
+
+In progress:
+- [ ] **`pal_for_group` fast path (build 01:48).** It ran on every `GXBegin` and searched all 9 palette slots
+  with two `memcmp` each. Now it returns at once when the model-view sequence and the palette generation are
+  unchanged. The palette upload now counts in the `uniforms` timer. Needs Azahar and hardware numbers.
+
+Open, ordered by expected gain:
+- [ ] **citro3d per-draw cost (draw_submit about 36 µs per draw, 4.4–11.5 ms).** Draws cannot merge across
+  texture changes (every forced draw has the textures dirty bit; about 290 texture switches per frame in a heavy
+  view). Next: time `C3Di_UpdateContext` against the draw commands, and count uniform rows sent per draw.
+- [ ] **gx_flush bookkeeping (about 9 ms not in its sub-timers at 01:40).** Palette upload (now timed),
+  `pal_for_group` (fast path in progress), deferral checks, and profiler tick reads.
+- [ ] **Vertex emit (about 2 µs per vertex).** emu64 `set_position` and the per-attribute GX calls.
+  1d (write vertices straight to the arena) is the in-progress item above.
+- [ ] **emu64 state setup in dirty_check (about 10 ms without texobj).** Find which dirty blocks run most.
+- [ ] **Other emu64 commands (about 14 ms).** Matrix commands, display-list jumps, tile setup.
+- [ ] **texobj (3.1–7.2 ms).** Per-bind content hash. Option: skip the hash for addresses in emu64's `.data`
+  conversion cache (each address holds one conversion until a reset, which now clears its range).
+- [ ] **1c: decal depth bias on the GPU.** emu64 projects, biases z, and unprojects each decal vertex on the CPU
+  (`emu64.c` `set_position`). PICA alternative: per-draw depth-map offset.
+- [ ] **1a/1b: GPU vertex transform with an indexed vertex cache.** Hardware `vtx_load` is only 4.4 ms, so 1a
+  alone is small; the gain is in 1b (each shared vertex is emitted once per triangle).
+- [ ] **2b: decode GC textures straight to PICA tiles** (no RGBA8 buffer, no format scan). Load stutter only.
+- [ ] **emu64 loads 8 black placeholder textures through `GXLoadTexObj` every frame.** Small.
+- [ ] **Hash sampling risk.** Textures over 512 bytes hash only the first and last 256 bytes; a texture that
+  changes only in the middle can show stale. Not observed.
+
 ## TODO
 
 - **Restore the Nintendo logo / progressive-scan screen.** `osCreateThread2`/`osStartThread`
@@ -191,8 +249,9 @@ Running list. Add items as they come up. Tick them off with the measurement that
 
 ## Known issues (future TODOs, not yet investigated)
 
-- **Stale frame behind a text box.** When a text box shows up, an old frame appears to be
-  displayed with it. Possibly a stale EFB copy. Not yet investigated.
+- **Stale frame behind a text box (fixed 2026-10-07, Azahar and hardware).** The CPU readback of the EFB copy
+  returned the previous transfer's pixels (first menu open black, later ones one location behind). Full-screen
+  EFB copies now go GPU-only: `n3ds_gl_capture_screen` (TextureCopy into a texture, rotated texcoords).
 - **No player control after exiting the train at game start.** Controls work in the train
   to set the player name. After leaving it, the Select menu opens, but the character cannot
   be moved at all. `m_train_control.c`'s `train_control_state` is a lead, not a cause. Needs

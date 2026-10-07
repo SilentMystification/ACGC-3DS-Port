@@ -8,7 +8,7 @@
  * a plain C wrapper cannot safely re-create, and idiv/uidiv alone already show whether
  * integer division is hot.
  *
- * [CALLS] prints every 600 frames (n3ds_gl.c perf_frame, same cadence as [PERF]), only when
+ * [CALLS] prints every 20 s (n3ds_gl.c perf_frame, same cadence as [PERF]), only when
  * "calls" is set; the wrappers always run (negligible: one counter bump), so a release
  * build pays nothing extra by leaving the switch off.
  */
@@ -36,13 +36,13 @@ static inline void record(int which, void* ra) {
     c->other++;
 }
 
-/* [CALLS] <name> total=<N>/600f  <addr>:<hits> ... (addresses: addr2line -e build3ds/ac_3ds.elf) */
+/* [CALLS] <name> total=<N>/20s  <addr>:<hits> ... (addresses: addr2line -e build3ds/ac_3ds.elf) */
 void n3ds_calls_report(void) {
     for (int f = 0; f < C_COUNT; f++) {
         CallStat* c = &s_stat[f];
         if (!c->total) continue;
         char buf[200];
-        int n = snprintf(buf, sizeof(buf), "[CALLS] %s total=%lu/600f", s_names[f], (unsigned long)c->total);
+        int n = snprintf(buf, sizeof(buf), "[CALLS] %s total=%lu/20s", s_names[f], (unsigned long)c->total);
         for (int i = 0; i < MAXC && c->who[i] && n < (int)sizeof(buf) - 24; i++)
             n += snprintf(buf + n, sizeof(buf) - n, " %p:%lu", c->who[i], (unsigned long)c->hit[i]);
         if (c->other) snprintf(buf + n, sizeof(buf) - n, " other:%lu", (unsigned long)c->other);
@@ -62,6 +62,8 @@ unsigned int n3ds_frame_id;
 static unsigned int s_use_frame, s_use_n[2], s_use_keys[2][64], s_use_overflow[2];
 static unsigned long long s_use_distinct[2], s_use_frames, s_use_loads[2];
 void n3ds_note_use(int kind, unsigned int key) {
+    extern int g_n3ds_dbg;
+    if (!(g_n3ds_dbg & 2048)) return; /* switch "calls" */
     if (s_use_frame != n3ds_frame_id) {
         for (int k = 0; k < 2; k++) { s_use_distinct[k] += s_use_n[k]; s_use_n[k] = 0; }
         s_use_frames++;
@@ -129,7 +131,7 @@ void n3ds_emu64_report(void) {
     memcpy(calls, pc_emu64_cmd_calls, sizeof(calls));
     memset(pc_emu64_cmd_calls, 0, sizeof(pc_emu64_cmd_calls));
     for (int i = 0; i < 256; i++) sum_calls += calls[i];
-    printf("[EMU64] 600f opcodes=%lu\n", (unsigned long)sum_calls);
+    printf("[EMU64] 20s opcodes=%lu\n", (unsigned long)sum_calls);
 
     /* [DRAW] forced draws in pc_gx_flush_vertices, reasons and dirty bits, same 600-frame window */
     extern unsigned int pc_gx_flush_reason[5];

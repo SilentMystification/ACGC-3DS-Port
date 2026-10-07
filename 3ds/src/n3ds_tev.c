@@ -481,6 +481,21 @@ static void n3ds_tev_build(void) {
  * Azahar returns 0). Units 1 and 2 get this 8x8 white texture instead. */
 static C3D_Tex s_white;
 
+/* What each unit has now. C3D_TexBind always marks the unit dirty, and citro3d then sends the
+ * unit's whole texture setup with the next draw; most draws change only unit 0. The data pointer
+ * catches a texture uploaded again into the same C3D_Tex. */
+static struct { const C3D_Tex* tex; const void* data; u32 param; float sel0; } s_unit[3];
+
+static void unit_bind(int u, C3D_Tex* tex) {
+    const void* data = tex ? tex->data : NULL;
+    u32 param = tex ? tex->param : 0; /* wrap and filter: citro3d reads them only for a dirty unit */
+    if (s_unit[u].tex == tex && s_unit[u].data == data && s_unit[u].param == param) return;
+    C3D_TexBind(u, tex);
+    s_unit[u].tex = tex;
+    s_unit[u].data = data;
+    s_unit[u].param = param;
+}
+
 /* Called before deleted textures are freed: a unit still bound to a freed texture would read freed
  * memory on the next draw. Unit 0 takes NULL, units 1 and 2 the white texture. The next texture
  * flush binds the real textures again. */
@@ -489,8 +504,8 @@ void n3ds_tex_units_detach(void) {
         memset(s_white.data, 0xFF, 64);
         C3D_TexFlush(&s_white);
     }
-    C3D_TexBind(0, NULL);
-    for (int s = 1; s < 3; s++) C3D_TexBind(s, s_white.data ? &s_white : NULL);
+    unit_bind(0, NULL);
+    for (int s = 1; s < 3; s++) unit_bind(s, s_white.data ? &s_white : NULL);
 }
 
 static void n3ds_bind_textures(void) {
@@ -510,11 +525,14 @@ static void n3ds_bind_textures(void) {
                 sel1 = 1.0f;
             }
         }
-        C3D_TexBind(s, tex || s == 0 ? tex : &s_white);
+        unit_bind(s, tex || s == 0 ? tex : &s_white);
         g_n3ds_tev_state.fmt[s] = tex ? (u8)tex->fmt : 0xFF;
         g_n3ds_tev_state.w[s] = tex ? tex->width : 0;
         g_n3ds_tev_state.h[s] = tex ? tex->height : 0;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unitsel + s, sel0, sel1, 0.0f, 0.0f);
+        if (s_unit[s].sel0 != sel0 + 1.0f) { /* stored +1: 0 = never set */
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, s_u.unitsel + s, sel0, sel1, 0.0f, 0.0f);
+            s_unit[s].sel0 = sel0 + 1.0f;
+        }
     }
 }
 
@@ -709,7 +727,18 @@ void n3ds_gx_upload(unsigned int dirty) {
     if (dirty & (PC_GX_DIRTY_FOG | PC_GX_DIRTY_PROJECTION)) n3ds_fog();
     if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST |
                  PC_GX_DIRTY_TEXTURES)) {
-        n3ds_tev_build();
+        /* The combiners depend on which stages have a texture, not on which texture: a texture
+         * change alone keeps them. A rebuild re-inits every TexEnv, and citro3d then re-sends them all. */
+        static int s_built_mask = -1;
+        int mask = 0;
+        for (int s = 0; s < g_gx.num_tev_stages && s < PC_GX_MAX_TEV_STAGES; s++) {
+            int map = g_gx.tev_stages[s].tex_map;
+            if (n3ds_gl_tex((map >= 0 && map < 8) ? g_gx.gl_textures[map] : 0)) mask |= 1 << s;
+        }
+        if ((dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST)) || mask != s_built_mask) {
+            n3ds_tev_build();
+            s_built_mask = mask;
+        }
         n3ds_bind_textures();
     }
     if (dirty & PC_GX_DIRTY_ALPHA_CMP) n3ds_alpha_test();

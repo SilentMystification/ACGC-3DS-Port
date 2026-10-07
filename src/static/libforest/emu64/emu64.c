@@ -14,6 +14,27 @@
 #include "dolphin/PPCArch.h"
 
 #ifdef TARGET_PC
+#include "pc_profiler.h"
+/* [PROFILE] timer for one emu64 scope (vtx_load, texconv, tri_cmds) */
+struct PcProfScope {
+    PCProfilerTimer timer;
+    Uint64 start;
+    PcProfScope(PCProfilerTimer t) : timer(t), start(pc_profiler_begin_timer()) {}
+    ~PcProfScope() { pc_profiler_add_time(timer, start); }
+};
+#define PC_PROF_SCOPE(t) PcProfScope pc_prof_scope_(t)
+/* [WORK] N64 -> GC conversions since the last read: [0] .data cache (kept), [1] bss (redone every frame) */
+extern "C" unsigned int pc_emu64_texconv_n[2], pc_emu64_texconv_bytes[2];
+unsigned int pc_emu64_texconv_n[2], pc_emu64_texconv_bytes[2];
+static void pc_count_texconv(int bss, unsigned int len) {
+    pc_emu64_texconv_n[bss]++;
+    pc_emu64_texconv_bytes[bss] += len;
+}
+#else
+#define PC_PROF_SCOPE(t)
+#endif
+
+#ifdef TARGET_PC
 #include "pc_platform.h"
 #ifdef TARGET_3DS
 extern unsigned int pc_emu64_dirty_count[64]; /* n3ds_calls.c */
@@ -385,7 +406,15 @@ static bool texture_cache_is_overflow(texture_cache_t* cache) {
     return cache->is_overflow;
 }
 
+#ifdef TARGET_PC
+extern "C" void pc_gx_texture_invalidate_range(const void* start, const void* end);
+#endif
+
 static void texture_cache_clear(texture_cache_t* cache) {
+#ifdef TARGET_PC
+    /* the .data buffer keeps conversions across frames: after a reset its addresses hold other textures */
+    if (cache == &texture_cache_data) pc_gx_texture_invalidate_range(cache->buffer_start, cache->buffer_end);
+#endif
     cache->is_overflow = false;
     cache->buffer_current = cache->buffer_start;
 }
@@ -699,6 +728,9 @@ void emu64::emu64_init() {
 
     int overflow = texture_cache_data.is_overflow;
     if (overflow) {
+#ifdef TARGET_PC
+        pc_gx_texture_invalidate_range(texture_cache_data.buffer_start, texture_cache_data.buffer_end);
+#endif
         texture_cache_data.is_overflow = false;
         texture_cache_data.buffer_current = texture_cache_data.buffer_start;
         texture_cache_num = 0;
@@ -967,6 +999,10 @@ u8* emu64::texconv_tile_new(u8* addr, unsigned int wd, unsigned int fmt, unsigne
     converted_addr = (u8*)(*texture_cache->funcs->alloc)(texture_cache, len);
     if (converted_addr != nullptr) {
         /* Convert from N64 -> GC */
+        PC_PROF_SCOPE(PC_PROF_TIMER_TEXCONV);
+#ifdef TARGET_PC
+        pc_count_texconv(texture_cache == &texture_cache_bss, len);
+#endif
         this->texconv_tile(addr, converted_addr, wd, fmt, siz, start_wd, start_ht, end_wd, end_ht, line_siz);
         /* Update cache & store entry */
         DCStoreRange(converted_addr, len);
@@ -1006,6 +1042,10 @@ u16* emu64::tlutconv_new(u16* tlut, unsigned int tlut_fmt, unsigned int count) {
     converted_tlut = (u16*)(*texture_cache->funcs->alloc)(texture_cache, len);
     if (converted_tlut != nullptr) {
         /* Convert from N64 -> GC */
+        PC_PROF_SCOPE(PC_PROF_TIMER_TEXCONV);
+#ifdef TARGET_PC
+        pc_count_texconv(texture_cache == &texture_cache_bss, len);
+#endif
         this->tlutconv(tlut, converted_tlut, count, tlut_fmt);
         /* Update cache & store entry */
         DCStoreRange(converted_tlut, len);
@@ -3165,6 +3205,7 @@ void emu64::draw_rectangle(Gtexrect2* texrect) {
 }
 
 void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
+    PC_PROF_SCOPE(PC_PROF_TIMER_DIRTY_CHECK);
 #ifdef TARGET_3DS
     /* [DIRTY] count flags set on entry, per 600-frame window (printed by n3ds_emu64_report) */
     pc_emu64_dirty_calls++;
@@ -4641,6 +4682,7 @@ void emu64::dl_G_MTX() {
 }
 
 void emu64::dl_G_VTX() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_VTX_LOAD);
     EMU64_TIMED_SEGMENT_BEGIN();
 
     Gvtx* vtx_gfx = (Gvtx*)&this->gfx;
@@ -4795,6 +4837,7 @@ void emu64::dl_G_LINE3D() {
 }
 
 void emu64::dl_G_TRI1() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_TRI_CMDS);
     Gtri1 tri_gfx = *(Gtri1*)this->gfx_p;
     u32 v0 = tri_gfx.v0 / 2;
     u32 v1 = tri_gfx.v1 / 2;
@@ -4825,6 +4868,7 @@ void emu64::dl_G_TRIN_INDEPEND() {
 }
 
 void emu64::dl_G_TRIN() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_TRI_CMDS);
     Gtrin* g;
     int n_faces;
     int first_pass = TRUE;
@@ -4965,6 +5009,7 @@ void emu64::dl_G_TRIN() {
 }
 
 void emu64::dl_G_QUADN() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_TRI_CMDS);
     Gquad* g;
     int n_faces;
     int first_pass = TRUE;
@@ -5080,6 +5125,7 @@ void emu64::dl_G_QUADN() {
 }
 
 void emu64::dl_G_TRI2() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_TRI_CMDS);
     int unused[2];
     u32 commands;
     u32 v0;

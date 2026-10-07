@@ -67,6 +67,18 @@ typedef struct {
     int stride;
 } PCGXVertexFormat;
 
+#ifdef TARGET_3DS
+/* Same layout as N3DSVtx (n3ds_gl.c), 40 bytes: the arena upload is one memcpy. Only the fields
+ * the 3DS path reads: emu64 writes one texcoord and no color1. Each vertex is cleared and copied
+ * once on the CPU, so every byte here costs per vertex. */
+typedef struct {
+    float position[3];
+    float normal[3];
+    unsigned char color0[4];
+    float texcoord[1][2];
+    float pal; /* batch palette offset (3 * slot) of the matrix pair this vertex uses */
+} PCGXVertex;
+#else
 typedef struct {
     float position[3];
     float normal[3];
@@ -75,6 +87,7 @@ typedef struct {
     float texcoord[8][2];
     float pal; /* 3DS: batch palette offset (3 * slot) of the matrix pair this vertex uses */
 } PCGXVertex;
+#endif
 
 typedef struct {
     int color_a, color_b, color_c, color_d;
@@ -126,7 +139,16 @@ typedef struct {
     int vertex_count;
     int expected_vertex_count;
     int in_begin;
+#ifdef TARGET_3DS
+    /* Points at the free tail of the GPU vertex arena (n3ds_gl.c): vertices are written where the GPU
+     * reads them, with no copy. vertex_cap: how many fit there (at most PC_GX_MAX_VERTS). */
+    PCGXVertex* vertex_buffer;
+    int vertex_cap;
+#define PC_GX_VTX_CAP (g_gx.vertex_cap)
+#else
     PCGXVertex vertex_buffer[PC_GX_MAX_VERTS];
+#define PC_GX_VTX_CAP PC_GX_MAX_VERTS
+#endif
     int current_vertex_idx;
     PCGXVertex current_vertex;
     /* Deferred draw stuff*/
