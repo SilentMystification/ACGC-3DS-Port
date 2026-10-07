@@ -40,7 +40,7 @@ static const char* s_timer_names[PC_PROF_TIMER_COUNT] = {
     "tex_bind", "shader_switch", "gl_state", "draw_submit", "poll", "swap", "pace",
     "game_logic", "emu64_task", "texobj",
     "draw_finish", "audio_frame", "jw_frame", "efb_copy",
-    "vtx_load", "texconv", "tri_cmds", "dirty_check"
+    "vtx_load", "texconv", "tri_cmds", "dirty_check", "dc_combine", "dc_tex", "dc_texmtx", "dc_light", "blacktex"
 };
 
 static const char* s_dirty_names[16] = {

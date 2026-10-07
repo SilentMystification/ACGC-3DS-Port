@@ -13,6 +13,9 @@
 #include "jsyswrap.h"
 #include "dolphin/PPCArch.h"
 
+#ifdef TARGET_3DS
+extern "C" void pc_gx_vertex_3ds(f32 x, f32 y, f32 z, const f32* nrm, u8 r, u8 g, u8 b, u8 a, int tex, s16 s, s16 t);
+#endif
 #ifdef TARGET_PC
 #include "pc_profiler.h"
 /* [PROFILE] timer for one emu64 scope (vtx_load, texconv, tri_cmds) */
@@ -116,6 +119,16 @@ static texture_cache_t texture_cache_bss = {
     FALSE,
     0,
 };
+
+#ifdef TARGET_3DS
+/* texture_buffer_data holds one N64->GC conversion per address until texture_cache_clear() resets it
+ * (which already invalidates pc_gx's cache entries for this range, see pc_gx_texture.c). So content at
+ * an unreset address cannot change: the per-bind content hash is skipped there. Registered once, at
+ * static init, since the buffer's bounds are fixed for the program's life. */
+extern "C" void pc_gx_texture_set_stable_range(const void* start, const void* end);
+static int s_register_stable_range =
+    (pc_gx_texture_set_stable_range(&texture_buffer_data[0], &texture_buffer_data[sizeof(texture_buffer_data)]), 0);
+#endif
 
 #include "../src/static/libforest/emu64/emu64_utility.c"
 
@@ -718,9 +731,12 @@ void emu64::emu64_init() {
                                   0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
                                   0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88 };
 
-    for (u32 i = GX_TEXMAP0; i < GX_MAX_TEXMAP; i++) {
-        GXInitTexObj(&this->tex_objs[i], black_texture, 8, 4, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE);
-        GXLoadTexObj(&this->tex_objs[i], (GXTexMapID)i);
+    {
+        PC_PROF_SCOPE(PC_PROF_TIMER_BLACKTEX);
+        for (u32 i = GX_TEXMAP0; i < GX_MAX_TEXMAP; i++) {
+            GXInitTexObj(&this->tex_objs[i], black_texture, 8, 4, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+            GXLoadTexObj(&this->tex_objs[i], (GXTexMapID)i);
+        }
     }
 
     texture_cache_bss.is_overflow = false;
@@ -2001,6 +2017,7 @@ void emu64::combine_manual() {
 }
 
 void emu64::combine() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_DC_COMBINE);
     if ((u8)this->combine_gfx.setcombine.cmd == G_SETCOMBINE_TEV) {
         this->combine_tev();
     } else {
@@ -2600,6 +2617,7 @@ void emu64::texture_gen(int tex) {
 }
 
 void emu64::texture_matrix() {
+    PC_PROF_SCOPE(PC_PROF_TIMER_DC_TEXMTX);
     // clang-format off
     static const float shift_tbl[] = {
         1.0f,
@@ -2730,6 +2748,12 @@ void emu64::texture_matrix() {
 
 void emu64::set_position(unsigned int vtx) {
     Vertex* emu_vtx = &this->vertices[vtx];
+#ifdef TARGET_3DS
+    f32 emit_x = 0.0f, emit_y = 0.0f, emit_z = 0.0f;
+#define EMU64_EMIT_POSITION(x, y, z) (emit_x = (x), emit_y = (y), emit_z = (z))
+#else
+#define EMU64_EMIT_POSITION(x, y, z) GXPosition3f32((x), (y), (z))
+#endif
 
     if (this->using_nonshared_mtx && (emu_vtx->flag & MTX_NONSHARED) == MTX_SHARED) {
         /* Translation: The nonshared triangle group is broken because a shared vertex is mixed in with the nonshared
@@ -2827,13 +2851,21 @@ void emu64::set_position(unsigned int vtx) {
         if ((emu_vtx->flag & MTX_NONSHARED) != MTX_SHARED) {
             f32 fx, fy, fz;
             guMtxXFM1F_dol7(this->position_mtx_stack[this->mtx_stack_size], ox, oy, oz, &fx, &fy, &fz);
-            GXPosition3f32(fx, fy, fz);
+            EMU64_EMIT_POSITION(fx, fy, fz);
         } else {
-            GXPosition3f32(ox, oy, oz);
+            EMU64_EMIT_POSITION(ox, oy, oz);
         }
     } else {
-        GXPosition3f32(emu_vtx->position.x, emu_vtx->position.y, emu_vtx->position.z);
+        EMU64_EMIT_POSITION(emu_vtx->position.x, emu_vtx->position.y, emu_vtx->position.z);
     }
+
+#ifdef TARGET_3DS
+    /* one call writes the whole vertex into the GPU arena (pc_gx.c) */
+    pc_gx_vertex_3ds(emit_x, emit_y, emit_z, (this->geometry_mode & G_LIGHTING) != 0 ? &emu_vtx->normal.x : NULL,
+                     emu_vtx->color.rgba.r, emu_vtx->color.rgba.g, emu_vtx->color.rgba.b, emu_vtx->color.rgba.a,
+                     this->texture_gfx.on != G_OFF, (s16)emu_vtx->tex_coords.s, (s16)emu_vtx->tex_coords.t);
+    return;
+#endif
 
     /* If geometry mode lighting is enabled, write vertex normals */
     if ((this->geometry_mode & G_LIGHTING) != 0) {
@@ -3338,6 +3370,7 @@ void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
 
     /* Lights block */
     if (IS_DIRTY(EMU64_DIRTY_FLAG_LIGHTS)) {
+        PC_PROF_SCOPE(PC_PROF_TIMER_DC_LIGHT);
         EMU64_TIMED_SEGMENT_BEGIN();
         CLEAR_DIRTY(EMU64_DIRTY_FLAG_LIGHTS);
         SET_DIRTY(EMU64_DIRTY_FLAG_LIGHTING);
@@ -3367,6 +3400,7 @@ void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
 
     /* Lighting block */
     if (IS_DIRTY(EMU64_DIRTY_FLAG_LIGHTING)) {
+        PC_PROF_SCOPE(PC_PROF_TIMER_DC_LIGHT);
         EMU64_TIMED_SEGMENT_BEGIN();
         CLEAR_DIRTY(EMU64_DIRTY_FLAG_LIGHTING);
         if ((this->geometry_mode & G_LIGHTING) != 0) {
@@ -3394,6 +3428,7 @@ void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
     /* Texture block */
     EMU64_ASSERTLINE_DEBUG(this, 4957);
     if (tile >= 0) {
+        PC_PROF_SCOPE(PC_PROF_TIMER_DC_TEX);
         EMU64_TIMED_SEGMENT_BEGIN();
         /* Flags TEXTURE0/1 are checked but not set in any version of the emulator. Not sure on the names. */
         if (IS_DIRTY(EMU64_DIRTY_FLAG_TEX_TILE0) || IS_DIRTY(EMU64_DIRTY_FLAG_21) ||

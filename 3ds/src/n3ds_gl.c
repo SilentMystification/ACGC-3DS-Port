@@ -61,6 +61,14 @@ static GLuint s_program;
 static N3DSTex* s_bound_tex;
 static N3DSTex* s_free_list; /* deleted during this frame; freed once the GPU is done */
 static u32 s_stat_draws, s_stat_verts;
+static u32 s_stat_cmdwords; /* [WORK]: GPU command words citro3d writes per draw (state it sends + the draw) */
+
+static u32 cmd_offset(void) {
+    u32* buf;
+    u32 size, offset;
+    GPUCMD_GetBuffer(&buf, &size, &offset);
+    return offset;
+}
 
 static struct {
     int depth_test, depth_mask, blend, cull, scissor;
@@ -492,6 +500,8 @@ static void perf_frame(void) {
            (unsigned long)(s_stat_verts * sizeof(N3DSVtx) / (n ? n : 1)), (unsigned long)(s_stat_draws / n),
            (unsigned long)(tex_lookups / n), (unsigned long)(tex_scan / n),
            tex_lookups ? (double)tex_scan / tex_lookups : 0.0, (unsigned long)tex_uploads, (unsigned long)n);
+    printf("[WORK] gpu cmd words/draw %.1f\n", s_stat_draws ? (double)s_stat_cmdwords / s_stat_draws : 0.0);
+    s_stat_cmdwords = 0;
     {   /* emu64 N64 -> GC conversions: .data results are kept, bss results are redone every frame */
         extern unsigned int pc_emu64_texconv_n[2], pc_emu64_texconv_bytes[2];
         printf("[TEXCONV] per frame: data %lu (%lu B)  bss %lu (%lu B)\n",
@@ -645,7 +655,10 @@ static void gl_draw_arrays(GLenum mode, GLint first, GLsizei count) {
     if (count >= 3 && draw_ready(s_arena)) {
         s_step = "draw (DrawArrays)";
         record_draw((int)prim >> 8, first, count);
+        u32 off0 = cmd_offset();
         C3D_DrawArrays(prim, (int)(s_draw_vtx - s_arena) + first, count);
+        u32 off1 = cmd_offset();
+        if (off1 >= off0) s_stat_cmdwords += off1 - off0;
     }
 }
 
@@ -655,7 +668,10 @@ static void gl_draw_elements(GLenum mode, GLsizei count, GLenum type, const void
     {
         s_step = "draw (DrawElements)";
         record_draw(4, 0, count); /* 4 = indexed quads */
+        u32 off0 = cmd_offset();
         C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, (const u8*)s_quad_idx + (uintptr_t)offset);
+        u32 off1 = cmd_offset();
+        if (off1 >= off0) s_stat_cmdwords += off1 - off0;
     }
 }
 

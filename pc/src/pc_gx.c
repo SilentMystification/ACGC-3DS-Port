@@ -550,6 +550,43 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.vertex_pending = 1;
 }
 
+#ifdef TARGET_3DS
+/* emu64's vertex in one call (emu64.c set_position): written straight into the next arena slot. The GX path
+ * clears and fills a staging vertex, then copies it, over 4 calls. nrm NULL = no normal (lighting off),
+ * tex 0 = no texcoord: those stay 0, as with GX. */
+void pc_gx_vertex_3ds(f32 x, f32 y, f32 z, const f32* nrm, u8 r, u8 g, u8 b, u8 a, int tex, s16 s, s16 t) {
+    if (g_gx.vertex_pending) { /* a vertex staged by the GX path: it comes first */
+        if (g_gx.current_vertex_idx < PC_GX_VTX_CAP)
+            g_gx.vertex_buffer[g_gx.current_vertex_idx++] = g_gx.current_vertex;
+        g_gx.vertex_pending = 0;
+    }
+    /* the GX path carries the last color into the next vertex */
+    g_gx.current_vertex.color0[0] = r;
+    g_gx.current_vertex.color0[1] = g;
+    g_gx.current_vertex.color0[2] = b;
+    g_gx.current_vertex.color0[3] = a;
+    if (g_gx.current_vertex_idx >= PC_GX_VTX_CAP) return;
+    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx++];
+    v->position[0] = x;
+    v->position[1] = y;
+    v->position[2] = z;
+    if (nrm) {
+        v->normal[0] = nrm[0];
+        v->normal[1] = nrm[1];
+        v->normal[2] = nrm[2];
+    } else {
+        v->normal[0] = v->normal[1] = v->normal[2] = 0.0f;
+    }
+    v->color0[0] = r;
+    v->color0[1] = g;
+    v->color0[2] = b;
+    v->color0[3] = a;
+    v->texcoord[0][0] = tex ? (f32)s : 0.0f;
+    v->texcoord[0][1] = tex ? (f32)t : 0.0f;
+    v->pal = s_grp_pal;
+}
+#endif
+
 void GXPosition3u16(u16 x, u16 y, u16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
 void GXPosition3s16(s16 x, s16 y, s16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
 void GXPosition3u8(u8 x, u8 y, u8 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }

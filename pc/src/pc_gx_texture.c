@@ -182,6 +182,21 @@ void pc_gx_texture_invalidate_range(const void* start, const void* end) {
     tex_cache_remove_if(drop_in_range, (u32)(uintptr_t)start);
 }
 
+/* Addresses in this range hold exactly one conversion until the caller resets it, which already
+ * calls pc_gx_texture_invalidate_range above. So the content at a given address cannot change
+ * underneath an unchanged cache entry, and the per-bind byte hash (up to 512 B) is not needed
+ * there: a constant stands in for it. Registered once by emu64.c (texture_buffer_data bounds). */
+static u32 s_stable_lo, s_stable_hi;
+#define PC_GX_STABLE_HASH 0xC0DEC0DEu
+void pc_gx_texture_set_stable_range(const void* start, const void* end) {
+    s_stable_lo = (u32)(uintptr_t)start;
+    s_stable_hi = (u32)(uintptr_t)end;
+}
+static int pc_gx_in_stable_range(const void* p) {
+    u32 a = (u32)(uintptr_t)p;
+    return s_stable_hi != 0 && a >= s_stable_lo && a < s_stable_hi;
+}
+
 static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tlut_name,
                                      u32 tlut_ptr, u32 tlut_hash, u32 data_hash) {
     tex_cache_scan_steps = 0;
@@ -783,6 +798,14 @@ static void pc_gx_load_tex_obj_impl(void* obj, u32 id) {
     if (!(g_n3ds_dbg & 131072) && memo[id].frame == frame_tag && memo[id].ptr == image_ptr && memo[id].w == width &&
         memo[id].h == height && memo[id].fmt == format) {
         hash = memo[id].hash;
+    } else if (pc_gx_in_stable_range(image_ptr)) {
+        hash = PC_GX_STABLE_HASH;
+        memo[id].frame = frame_tag;
+        memo[id].ptr = image_ptr;
+        memo[id].w = width;
+        memo[id].h = height;
+        memo[id].fmt = format;
+        memo[id].hash = hash;
     } else {
         hash = tex_content_hash(image_ptr, width, height, format);
         memo[id].frame = frame_tag;

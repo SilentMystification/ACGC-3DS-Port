@@ -213,24 +213,58 @@ In progress:
   with two `memcmp` each. Now it returns at once when the model-view sequence and the palette generation are
   unchanged. The palette upload now counts in the `uniforms` timer. Needs Azahar and hardware numbers.
 
+- [ ] **Measurement build 02:07.** Timers inside dirty_check (`dc_combine`, `dc_tex`, `dc_texmtx`, `dc_light`) and
+  `[WORK] gpu cmd words/draw`. Azahar title: about 87 command words per draw, so citro3d's per-draw cost is CPU
+  work, not command volume. dirty_check 4.35 ms = dc_tex 2.53 (texobj 1.06, texmtx 0.47) + combine 0.29 +
+  light 0.11 + other about 1.4. O3DS (`build3ds/hw_o3ds_0207_log.txt`, about 10.2k vertices, 290 draws, 93.5 ms):
+  dirty_check 20.5 = dc_tex 13.9 (texobj 7.0, texture_matrix 3.3, tile setup about 3.6) + combine 1.7 + light 0.65
+  + other about 4.3; gx_flush 25.5 = draw_submit 9.7 + uniforms 8.1 (incl. palette) + about 7 other; vertex emit
+  about 18; vtx_load 4.6; other emu64 about 14; game_logic 7.2; about 93 GPU command words per draw.
+  Caution: the profiler's own `svcGetSystemTick` calls (thousands of timer pairs per frame) now inflate absolute
+  times on O3DS. Take real frame times from `[PERF]` with `debug3ds.txt` empty.
+- [x] **LTO on (`3ds/CMakeLists.txt`, `CMAKE_INTERPROCEDURAL_OPTIMIZATION`).** emu64 calls into `pc_gx.c` 5 times
+  per vertex and more per state change; across files those were real calls. O3DS A/B, profile off, town, about
+  7,600 vertices (`hw_o3ds_0207_noprof_log.txt` vs `hw_o3ds_lto_noprof_log.txt`): 50.7 → 43.2–45.0 ms (the LTO
+  windows had about 14 fewer draws). Azahar title: 23.7 → 22.3 ms. Full build about 60 s.
+- Real O3DS baseline without profiler (02:07): 6,585 vertices 42.9 ms, 6,936 45.5 ms, 7,653 50.7 ms, 7,926 52.6 ms.
+  The profiled runs were much slower (01:26: 66.8 ms at 7,705): use `[PERF]` with profile off for real times.
+
 Open, ordered by expected gain:
 - [ ] **citro3d per-draw cost (draw_submit about 36 µs per draw, 4.4–11.5 ms).** Draws cannot merge across
   texture changes (every forced draw has the textures dirty bit; about 290 texture switches per frame in a heavy
   view). Next: time `C3Di_UpdateContext` against the draw commands, and count uniform rows sent per draw.
 - [ ] **gx_flush bookkeeping (about 9 ms not in its sub-timers at 01:40).** Palette upload (now timed),
   `pal_for_group` (fast path in progress), deferral checks, and profiler tick reads.
-- [ ] **Vertex emit (about 2 µs per vertex).** emu64 `set_position` and the per-attribute GX calls.
-  1d (write vertices straight to the arena) is the in-progress item above.
+- [ ] **Vertex emit fast path (build 03:50, inconclusive).** emu64 `set_position` on 3DS stores the position in
+  locals and calls `pc_gx_vertex_3ds` once: the vertex goes straight into the next arena slot (no 40-byte clear,
+  no staging copy, one call instead of four). Azahar: draws correctly. O3DS A/B vs. LTO-only, profile off, free
+  roam (`hw_o3ds_lto_noprof_log.txt` vs `hw_o3ds_0350_noprof_log.txt`): ~7,040-7,690 vtx, 41.2-46.7 ms either
+  way, same per-vertex cost (5.7-6.1 us/vtx). **Not a real A/B**: each capture has only 4-5 usable 20s windows,
+  and stutter counts near the frame count show scene content dominates frame time more than the code path does.
+  Needs a controlled benchmark (fixed spot/camera, longer capture, or a scripted replay) before concluding
+  either way. Kept in the build; not reverted.
 - [ ] **emu64 state setup in dirty_check (about 10 ms without texobj).** Find which dirty blocks run most.
 - [ ] **Other emu64 commands (about 14 ms).** Matrix commands, display-list jumps, tile setup.
-- [ ] **texobj (3.1–7.2 ms).** Per-bind content hash. Option: skip the hash for addresses in emu64's `.data`
-  conversion cache (each address holds one conversion until a reset, which now clears its range).
+- [x] **texobj: skip per-bind content hash for emu64's `.data` conversion cache (build 03:58).** Addresses in
+  `texture_buffer_data` hold one conversion until a reset (which already clears the matching cache entries, see
+  the memory-cache item above), so content there can't change under an unreset entry — a constant replaces the
+  up-to-512-byte hash. Registered once from emu64.c via `pc_gx_texture_set_stable_range`. Also fixed an unrelated
+  ODR bug it surfaced: `include/dolphin/os/OSThread.h`'s `#if VERSION >= VER_GAFU01_00` was unguarded, so a file
+  not including `types.h` saw a different `OSThread` size (LTO `-Wodr` caught it); now `#if defined(...) && ...`.
+  Azahar: draws correctly. O3DS: no crash, 120s run clean (`hw_o3ds_0358_noprof_log.txt`). No benchmark mode
+  built per user direction (2026-10-07) — visual inspection is enough for now; a controlled benchmark is a
+  future option if finer measurement is ever needed.
 - [ ] **1c: decal depth bias on the GPU.** emu64 projects, biases z, and unprojects each decal vertex on the CPU
   (`emu64.c` `set_position`). PICA alternative: per-draw depth-map offset.
 - [ ] **1a/1b: GPU vertex transform with an indexed vertex cache.** Hardware `vtx_load` is only 4.4 ms, so 1a
   alone is small; the gain is in 1b (each shared vertex is emitted once per triangle).
 - [ ] **2b: decode GC textures straight to PICA tiles** (no RGBA8 buffer, no format scan). Load stutter only.
-- [ ] **emu64 loads 8 black placeholder textures through `GXLoadTexObj` every frame.** Small.
+- [x] **emu64 loads 8 black placeholder textures through `GXLoadTexObj` every frame (checked, no change needed).**
+  Confirmed it runs every frame (`emu64_init()` from `graph_task_set00`, not once at scene load as first assumed).
+  Measured (Azahar, `blacktex` timer): 0.04 ms/frame. The texture cache already keys on (address, w, h, format),
+  and this buffer's address/dims never change, so after frame 1 it's a cache hit each time. Not worth removing.
+- [ ] **Profiler cost.** `svcGetSystemTick` per timer is a system call; thousands per frame inflate `[PROFILE]` on
+  O3DS. Option: a cheaper clock, or fewer timers on per-draw/per-command paths.
 - [ ] **Hash sampling risk.** Textures over 512 bytes hash only the first and last 256 bytes; a texture that
   changes only in the middle can show stale. Not observed.
 

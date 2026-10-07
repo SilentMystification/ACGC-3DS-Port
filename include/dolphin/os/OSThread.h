@@ -69,7 +69,9 @@ struct OSThread
     u32 *stackEnd; // last word of stack (low address)
 
 // TODO: we should be using a newer SDK version
-#if VERSION >= VER_GAFU01_00
+// defined(): VER_GAFU01_00 comes from types.h. Without it the test was 0 >= 0 (true), so files that did not
+// include types.h saw a larger OSThread than the rest of the build (found by LTO -Wodr).
+#if defined(VER_GAFU01_00) && VERSION >= VER_GAFU01_00
     s32 error;
     void* specific[2];
 #endif

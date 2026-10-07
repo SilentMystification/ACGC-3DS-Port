@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
+# LTO: emu64 calls into pc_gx.c several times per vertex and per state change; across files these are
+# real calls without it. O3DS A/B, town, about 7,600 vertices/frame, profiling off: 50.7 -> 43.2-45.0 ms.
+cmake_policy(SET CMP0069 NEW)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+
 set(DECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(PC_DIR "${DECOMP_ROOT}/pc")
 

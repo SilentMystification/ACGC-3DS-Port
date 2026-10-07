@@ -33,6 +33,11 @@ typedef enum {
     PC_PROF_TIMER_TEXCONV,  /* emu64 N64 -> GC texture and TLUT conversions */
     PC_PROF_TIMER_TRI_CMDS, /* emu64 triangle commands: vertex emit through GX (includes their gx_flush) */
     PC_PROF_TIMER_DIRTY_CHECK, /* emu64 dirty_check: state setup before a draw (inside tri_cmds) */
+    PC_PROF_TIMER_DC_COMBINE,  /* inside dirty_check: emu64 combine() (TEV setup) */
+    PC_PROF_TIMER_DC_TEX,      /* inside dirty_check: texture block (tile setup, GXLoadTexObj, texture matrix) */
+    PC_PROF_TIMER_DC_TEXMTX,   /* inside dc_tex: emu64 texture_matrix() */
+    PC_PROF_TIMER_DC_LIGHT,    /* inside dirty_check: lights and lighting blocks */
+    PC_PROF_TIMER_BLACKTEX,    /* emu64_init: the 8 placeholder-texture GXInitTexObj/GXLoadTexObj calls */
     PC_PROF_TIMER_COUNT
 } PCProfilerTimer;
 
